@@ -31,8 +31,12 @@ spec:
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef: { name: stateinspector-db, key: DATABASE_URL }
+          # Alle drei Ports deklarieren: sonst ist aus dem Manifest nicht
+          # ersichtlich, wo MCP und die Probes liegen.
           ports:
             - { name: metrics, containerPort: 8080 }
+            - { name: mcp, containerPort: 8081 }
+            - { name: health, containerPort: 8082 }
           livenessProbe:
             httpGet: { path: /healthz, port: 8082 }
           readinessProbe:

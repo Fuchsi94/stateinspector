@@ -1,8 +1,8 @@
 # stateinspector — Progress
 
-Phase: work (MVP Phase 1+2 laut `docs/IMPLEMENTATION_PROMPT.md`)
-Next: U1 des Plans — Go-Modul auf Go 1.27, Tool-Direktiven, Versions-Achse in `Dockerfile`
-und `justfile` an controller-runtime v0.25 angleichen.
+Phase: work — U1 bis U14 implementiert und verifiziert (2026-09-29)
+Next: Shipping — `ce-simplify-code`, Code-Review, dann PR. Danach erst ist der
+MVP abgeschlossen; die Post-MVP-Punkte unten bleiben offen.
 
 ## Artefakte
 - Plan: `docs/plans/2026-09-29-stateinspector-mvp.md` (14 Units, Verification Contract, Definition of Done)
@@ -28,17 +28,48 @@ Kein Brainstorm noetig: der Implementierungsprompt ist bereits ein vollstaendige
 Repo-Verzeichnis am 29.09. von `k8s-inspector` auf `stateinspector` umbenannt, passend zum
 Modulpfad und zum Projektnamen im Geruest.
 
+## Stand 2026-09-29 — MVP implementiert
+
+Alle 14 Units umgesetzt, `just check` und `just e2e` gruen, Akzeptanzkriterien gegen
+einen echten kind-Cluster geprueft:
+
+- `just churn` erzeugt genau vier Eintraege (Image, Replicas, Label, neue ConfigMap),
+  null Duplikate, null ReplicaSet-/Pod-/Lease-Rauschen.
+- RBAC zeigt ausschliesslich `get`/`list`/`watch` auf die sechs Arten. Leader-Election
+  ist eine namespaced Role, keine ClusterRole.
+- Kein ConfigMap-Wert in `changes` oder `resources` (per SQL geprueft, 0 Treffer).
+- Die vier Leitfragen sind ueber MCP beantwortbar; `test/e2e/questions_test.go` haelt
+  das als Test fest.
+
+### Zwei Funde, die die Tests erzwungen haben
+
+- **Kein Unit haengte den Collector an den Manager.** Der Plan definierte Handler,
+  Writer und Sweeper, aber keine Unit verdrahtete sie. Ohne `runner.go` waere der
+  Collector nie angelaufen. Nachgezogen als eigener Commit.
+- **MCP-Zeitstempel waren nicht rundreisefaehig.** `observed_at` ging auf Sekunden
+  gerundet raus, gespeichert wird mikrosekundengenau. Ein zurueckgegebener Zeitstempel
+  als `at` eingesetzt schnitt per `observed_at <= at` genau die gesuchte Version weg.
+  Behoben durch RFC3339Nano in der MCP-Schicht.
+
+### Datenmenge (Basis fuer die Retention-Entscheidung)
+
+Nach `just up` + `just churn` im kind-Cluster: **60 Eintraege in `changes`, 224 kB
+inklusive Indizes, rund 3.8 kB pro Eintrag** (JSONB wird von Postgres via TOAST
+komprimiert). `resources`: 18 Zeilen, 96 kB. Hochgerechnet kostet ein Cluster mit
+500 beobachteten Objekten und 20 Aenderungen pro Tag rund 28 MB im Jahr — unkritisch,
+aber unbegrenzt wachsend. Die Zahl ist der Ausgangspunkt fuer die Retention-Frage.
+
 ## Offene Punkte (im MVP)
-- **Schritt 6, CI-E2E:** Der `e2e`-Job macht aktuell nur `kubectl apply -k config/base
-  --dry-run=client`, deployt also weder Postgres noch den Operator. Zusaetzlich referenziert
-  `config/dev` hart das Image `stateinspector`, nicht `stateinspector:ci` aus `E2E_IMAGE` —
-  kustomize hat dort keinen `images:`-Transformer. Beides beim E2E-Schritt aufloesen.
-- **Versions-Achse (verifiziert, jetzt U1):** controller-runtime v0.25 verlangt Go >= 1.26 und
-  zielt auf client-go v0.37. `Dockerfile` pinnt `GO_VERSION=1.25` und baut damit nicht;
-  `justfile` pinnt `envtest_k8s := "1.34.x"`, was zu CR v0.22 gehoert. Beides zieht auf die
-  neueste Achse (Go 1.27, envtest 1.37.x).
-- Kleinigkeit: `config/dev/kustomization.yaml` patcht `args/1` per Index. Reordert jemand die
-  Flags, greift der Patch still das falsche Argument.
+- ~~CI-E2E deployt nichts~~ — erledigt in U13: der Job deployt Postgres, Operator und
+  Demo-Workloads, `config/ci` pinnt das gebaute Image. **Noch nicht auf GitHub gelaufen**,
+  da kein Remote konfiguriert ist; lokal ist der aequivalente Pfad gruen.
+- ~~Versions-Achse~~ — erledigt in U1: Go 1.27, controller-runtime v0.25.1,
+  envtest 1.37.0, k8s.io/api v0.37.0.
+- ~~Index-Patch auf `args/1`~~ — erledigt in U14: Strategic-Merge ersetzt die Liste als Ganzes.
+- **Neu gefunden, nicht behoben:** `just psql` reicht `{{args}}` unquotiert weiter und nutzt
+  `-it`. `just psql -c "SELECT ..."` zerfaellt damit in Einzelargumente und scheitert ohne
+  TTY. Fuer interaktiven Gebrauch funktioniert die Recipe; fuer Skripte braeuchte es eine
+  eigene `just sql <query>`. Bewusst nicht im Rahmen von U14 geaendert.
 
 ## Post-MVP-Backlog
 - **Retention.** Kein Pruning, keine TTL. Jede Version speichert das volle normalisierte Objekt
