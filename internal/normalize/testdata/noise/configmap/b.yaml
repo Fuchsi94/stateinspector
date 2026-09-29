@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: web-config
+  namespace: demo
+  uid: 33333333-3333-3333-3333-333333333333
+  resourceVersion: "78"
+  creationTimestamp: "2026-09-01T10:00:00Z"
+data:
+  LOG_LEVEL: info

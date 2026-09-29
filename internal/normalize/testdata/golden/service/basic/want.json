@@ -1,0 +1,11 @@
+{
+  "apiVersion": "v1",
+  "kind": "Service",
+  "metadata": { "name": "web", "namespace": "demo" },
+  "spec": {
+    "clusterIP": "10.96.0.10",
+    "clusterIPs": [ "10.96.0.10" ],
+    "selector": { "app": "web" },
+    "ports": [ { "port": 80, "targetPort": 80 } ]
+  }
+}

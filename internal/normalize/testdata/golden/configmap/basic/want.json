@@ -1,0 +1,9 @@
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": { "name": "web-config", "namespace": "demo" },
+  "data": {
+    "keys": [ "LOG_LEVEL" ],
+    "sha256": "ce705679c69d8e0e8c206cf1e5e266cb6341b5950d15b172c4f5adf8c6835136"
+  }
+}
