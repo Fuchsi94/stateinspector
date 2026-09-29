@@ -11,6 +11,11 @@ import (
 	"github.com/Fuchsi94/stateinspector/internal/store"
 )
 
+// Zeitstempel gehen mit Sekundenbruchteilen raus. Ein Modell fuettert einen
+// zurueckgegebenen observed_at naturgemaess wieder in get_resource oder
+// diff_resource; auf Sekunden gerundet schneidet "observed_at <= at" genau die
+// Version weg, nach der gefragt wurde.
+
 // maxResults kappt jede Antwort. Ohne harte Grenze kann eine einzige Abfrage
 // das Kontextfenster des fragenden Modells fuellen (R18).
 const maxResults = 500
@@ -193,7 +198,7 @@ func (s *Server) listChanges(ctx context.Context, _ *mcpsdk.CallToolRequest, in 
 	}
 	for _, row := range rows {
 		out.Changes = append(out.Changes, ChangeView{
-			ObservedAt: row.ObservedAt.Format(time.RFC3339), ChangeType: string(row.Type),
+			ObservedAt: row.ObservedAt.Format(time.RFC3339Nano), ChangeType: string(row.Type),
 			Offline: row.Offline, Kind: row.Kind, Namespace: row.Namespace, Name: row.Name,
 			ChangedPaths: row.ChangedPaths, Images: row.Images,
 		})
@@ -219,10 +224,10 @@ func (s *Server) getResource(ctx context.Context, _ *mcpsdk.CallToolRequest, in 
 		// Kein Fehler: "existierte damals nicht" ist eine gueltige Antwort.
 		return nil, getResourceOut{Note: fmt.Sprintf(
 			"%s %s/%s existierte am %s nicht (oder wird nicht beobachtet).",
-			in.Kind, in.Namespace, in.Name, at.Format(time.RFC3339))}, nil
+			in.Kind, in.Namespace, in.Name, at.Format(time.RFC3339Nano))}, nil
 	}
 	return nil, getResourceOut{
-		Found: true, ObservedAt: observedAt.Format(time.RFC3339), Object: object,
+		Found: true, ObservedAt: observedAt.Format(time.RFC3339Nano), Object: object,
 	}, nil
 }
 
@@ -258,8 +263,8 @@ func (s *Server) diffResource(ctx context.Context, _ *mcpsdk.CallToolRequest, in
 	}
 	out := diffResourceOut{
 		Found:          true,
-		FromObservedAt: beforeAt.Format(time.RFC3339),
-		ToObservedAt:   afterAt.Format(time.RFC3339),
+		FromObservedAt: beforeAt.Format(time.RFC3339Nano),
+		ToObservedAt:   afterAt.Format(time.RFC3339Nano),
 		ChangedPaths:   result.ChangedPaths,
 	}
 	if len(result.Patch) > 0 {
@@ -309,10 +314,10 @@ func capRows(rows []store.ResourceSummary) ([]store.ResourceSummary, bool, strin
 func view(row store.ResourceSummary) ResourceView {
 	out := ResourceView{
 		Kind: row.Kind, Namespace: row.Namespace, Name: row.Name,
-		Images: row.Images, LastChanged: row.LastChanged.Format(time.RFC3339),
+		Images: row.Images, LastChanged: row.LastChanged.Format(time.RFC3339Nano),
 	}
 	if row.DeletedAt != nil {
-		out.DeletedAt = row.DeletedAt.UTC().Format(time.RFC3339)
+		out.DeletedAt = row.DeletedAt.UTC().Format(time.RFC3339Nano)
 	}
 	return out
 }
