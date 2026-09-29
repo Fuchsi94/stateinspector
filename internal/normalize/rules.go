@@ -113,3 +113,15 @@ func summarizeData(field string) Rule {
 		return nil
 	}
 }
+
+// StripConfigMapData ersetzt data und binaryData durch Schluessel und Hash.
+// Der Cache-Transform des Collectors nutzt dieselbe Funktion wie die
+// Normalisierung, damit beide Pfade nicht auseinanderlaufen (R8, R9).
+func StripConfigMapData(obj map[string]any) error {
+	for _, field := range []string{"data", "binaryData"} {
+		if err := summarizeData(field)(obj); err != nil {
+			return err
+		}
+	}
+	return nil
+}

@@ -12,13 +12,18 @@ import (
 	"strings"
 	"sync"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+
+	"github.com/Fuchsi94/stateinspector/internal/collector"
 )
 
 // defaultExcludeNamespaces sind die Namespaces, die ohne gegenteilige Angabe
@@ -167,6 +172,17 @@ func (g *readyGate) check(_ *http.Request) error {
 	return fmt.Errorf("not ready: %s", strings.Join(open, ", "))
 }
 
+// cacheByObject haengt den ConfigMap-Transform vor den Informer-Store. Der
+// Schluessel traegt die GVK, weil clusterweit mit unstructured beobachtet wird
+// und der Go-Typ die Art damit nicht mehr verraet (KTD7).
+func cacheByObject() map[client.Object]cache.ByObject {
+	configMap := &unstructured.Unstructured{}
+	configMap.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"})
+	return map[client.Object]cache.ByObject{
+		configMap: {Transform: collector.StripConfigMapValues},
+	}
+}
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "stateinspector: %v\n", err)
@@ -206,7 +222,10 @@ func run() error {
 		LeaderElection:          opts.leaderElect,
 		LeaderElectionID:        leaderElectionID,
 		LeaderElectionNamespace: os.Getenv("POD_NAMESPACE"),
-		Cache:                   cache.Options{DefaultNamespaces: filter.cacheNamespaces()},
+		Cache: cache.Options{
+			DefaultNamespaces: filter.cacheNamespaces(),
+			ByObject:          cacheByObject(),
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("build manager: %w", err)
