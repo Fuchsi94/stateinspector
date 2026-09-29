@@ -24,6 +24,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/Fuchsi94/stateinspector/internal/collector"
+	"github.com/Fuchsi94/stateinspector/internal/store"
 )
 
 // defaultExcludeNamespaces sind die Namespaces, die ohne gegenteilige Angabe
@@ -202,7 +203,8 @@ func run() error {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&zapOpts)))
 	log := ctrl.Log.WithName("setup")
 
-	if _, err := requireDatabaseURL(os.Getenv); err != nil {
+	databaseURL, err := requireDatabaseURL(os.Getenv)
+	if err != nil {
 		return err
 	}
 
@@ -214,6 +216,24 @@ func run() error {
 	}
 
 	gate := newReadyGate("cache", "migrations", "database")
+
+	ctx := ctrl.SetupSignalHandler()
+	db, err := store.New(ctx, databaseURL)
+	if err != nil {
+		return fmt.Errorf("connect store: %w", err)
+	}
+	defer db.Close()
+
+	// Readiness quittiert jede Vorbedingung einzeln, damit ein haengender
+	// Schritt im Probe-Text sichtbar wird statt in einem pauschalen "not ready".
+	if err := db.Migrate(ctx); err != nil {
+		return fmt.Errorf("migrate store: %w", err)
+	}
+	gate.done("migrations")
+	if err := db.Ping(ctx); err != nil {
+		return fmt.Errorf("reach store: %w", err)
+	}
+	gate.done("database")
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                  scheme,
@@ -239,6 +259,16 @@ func run() error {
 		return fmt.Errorf("register readyz: %w", err)
 	}
 
+	if err := mgr.Add(collector.NewRunner(collector.RunnerOptions{
+		Cluster:     opts.clusterName,
+		Cache:       mgr.GetCache(),
+		Backend:     db,
+		Watches:     filter.watches,
+		CacheSynced: func() { gate.done("cache") },
+	})); err != nil {
+		return fmt.Errorf("add collector: %w", err)
+	}
+
 	log.Info("starte stateinspector",
 		"cluster", opts.clusterName,
 		"leaderElect", opts.leaderElect,
@@ -249,7 +279,7 @@ func run() error {
 		"excludeNamespaces", splitList(opts.excludeNamespaces),
 	)
 
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		return fmt.Errorf("run manager: %w", err)
 	}
 	return nil
