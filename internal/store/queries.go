@@ -202,3 +202,144 @@ func (s *Store) ObjectAt(ctx context.Context, cluster, kind, namespace, name str
 	}
 	return object, observedAt.UTC(), true, nil
 }
+
+// ChangeFilter schraenkt list_changes ein. Leere Felder filtern nicht.
+type ChangeFilter struct {
+	Cluster   string
+	Since     time.Time
+	Until     time.Time
+	Namespace string
+	Kind      string
+	Name      string
+	Limit     int
+}
+
+// ChangeSummary ist die Listenansicht: ohne das vollstaendige Objekt, damit
+// eine Antwort nicht das Kontextfenster eines Modells sprengt (R14).
+type ChangeSummary struct {
+	ObservedAt   time.Time
+	Type         ChangeType
+	Offline      bool
+	Kind         string
+	Namespace    string
+	Name         string
+	ChangedPaths []string
+	Images       []string
+}
+
+// ListChanges liefert Aenderungen im Zeitfenster, neueste zuerst.
+func (s *Store) ListChanges(ctx context.Context, f ChangeFilter) ([]ChangeSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT observed_at, change_type, offline, kind, namespace, name, changed_paths, images
+		FROM changes
+		WHERE cluster = $1
+		  AND observed_at >= $2
+		  AND observed_at <= $3
+		  AND ($4 = '' OR namespace = $4)
+		  AND ($5 = '' OR kind = $5)
+		  AND ($6 = '' OR name = $6)
+		ORDER BY observed_at DESC, id DESC
+		LIMIT $7`,
+		f.Cluster, f.Since.UTC(), f.Until.UTC(), f.Namespace, f.Kind, f.Name, f.Limit)
+	if err != nil {
+		return nil, fmt.Errorf("list changes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ChangeSummary
+	for rows.Next() {
+		var (
+			item       ChangeSummary
+			changeType string
+		)
+		if err := rows.Scan(&item.ObservedAt, &changeType, &item.Offline, &item.Kind,
+			&item.Namespace, &item.Name, &item.ChangedPaths, &item.Images); err != nil {
+			return nil, fmt.Errorf("scan change: %w", err)
+		}
+		item.Type = ChangeType(changeType)
+		item.ObservedAt = item.ObservedAt.UTC()
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate changes: %w", err)
+	}
+	return out, nil
+}
+
+// ResourceSummary ist die Uebersicht ueber beobachtete Objekte (R17).
+type ResourceSummary struct {
+	Kind        string
+	Namespace   string
+	Name        string
+	Images      []string
+	LastChanged time.Time
+	DeletedAt   *time.Time
+}
+
+// ListResources liefert beobachtete Objekte, optional inklusive geloeschter.
+func (s *Store) ListResources(ctx context.Context, cluster, kind, namespace string, includeDeleted bool, limit int) ([]ResourceSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT kind, namespace, name, images, last_changed, deleted_at
+		FROM resources
+		WHERE cluster = $1
+		  AND ($2 = '' OR kind = $2)
+		  AND ($3 = '' OR namespace = $3)
+		  AND ($4 OR deleted_at IS NULL)
+		ORDER BY namespace, kind, name
+		LIMIT $5`,
+		cluster, kind, namespace, includeDeleted, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list resources: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ResourceSummary
+	for rows.Next() {
+		var item ResourceSummary
+		if err := rows.Scan(&item.Kind, &item.Namespace, &item.Name, &item.Images,
+			&item.LastChanged, &item.DeletedAt); err != nil {
+			return nil, fmt.Errorf("scan resource: %w", err)
+		}
+		item.LastChanged = item.LastChanged.UTC()
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate resources: %w", err)
+	}
+	return out, nil
+}
+
+// CurrentWorkloads liefert lebende Objekte mit ihren Images; das beantwortet
+// "welche Version laeuft von X" (R17).
+func (s *Store) CurrentWorkloads(ctx context.Context, cluster, namespace, nameContains string, limit int) ([]ResourceSummary, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT kind, namespace, name, images, last_changed, deleted_at
+		FROM resources
+		WHERE cluster = $1
+		  AND deleted_at IS NULL
+		  AND cardinality(images) > 0
+		  AND ($2 = '' OR namespace = $2)
+		  AND ($3 = '' OR name ILIKE '%' || $3 || '%')
+		ORDER BY namespace, kind, name
+		LIMIT $4`,
+		cluster, namespace, nameContains, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list current workloads: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ResourceSummary
+	for rows.Next() {
+		var item ResourceSummary
+		if err := rows.Scan(&item.Kind, &item.Namespace, &item.Name, &item.Images,
+			&item.LastChanged, &item.DeletedAt); err != nil {
+			return nil, fmt.Errorf("scan workload: %w", err)
+		}
+		item.LastChanged = item.LastChanged.UTC()
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate workloads: %w", err)
+	}
+	return out, nil
+}

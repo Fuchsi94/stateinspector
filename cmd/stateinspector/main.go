@@ -24,6 +24,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/Fuchsi94/stateinspector/internal/collector"
+	"github.com/Fuchsi94/stateinspector/internal/mcp"
 	"github.com/Fuchsi94/stateinspector/internal/store"
 )
 
@@ -267,6 +268,14 @@ func run() error {
 		CacheSynced: func() { gate.done("cache") },
 	})); err != nil {
 		return fmt.Errorf("add collector: %w", err)
+	}
+
+	// Lesen darf jede Replik; der Listener braucht deshalb keine Lease.
+	if err := mgr.Add(mcp.NewListener(
+		mcp.NewServer(mcp.Options{Backend: db, Cluster: opts.clusterName}),
+		opts.mcpAddr,
+	)); err != nil {
+		return fmt.Errorf("add mcp listener: %w", err)
 	}
 
 	log.Info("starte stateinspector",
