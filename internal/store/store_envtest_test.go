@@ -232,7 +232,7 @@ func TestObjectAtAfterDeletionReturnsNothing(t *testing.T) {
 	}
 }
 
-func TestCurrentAndLiveUIDsTrackDeletion(t *testing.T) {
+func TestCurrentAndLiveResourcesTrackDeletion(t *testing.T) {
 	ctx := t.Context()
 	s := freshStore(t)
 
@@ -249,12 +249,15 @@ func TestCurrentAndLiveUIDsTrackDeletion(t *testing.T) {
 	if snap.Hash != "nginx:1.27" {
 		t.Errorf("Current().Hash = %q, want nginx:1.27", snap.Hash)
 	}
-	live, err := s.LiveUIDs(ctx, "local")
+	live, err := s.LiveResources(ctx, "local")
 	if err != nil {
-		t.Fatalf("LiveUIDs(): %v", err)
+		t.Fatalf("LiveResources(): %v", err)
 	}
-	if _, ok := live[uid]; !ok {
-		t.Error("LiveUIDs() enthaelt das lebende Objekt nicht")
+	if len(live) != 1 || live[0].UID != uid {
+		t.Fatalf("LiveResources() = %+v, want genau das lebende Objekt", live)
+	}
+	if live[0].Kind != "Deployment" || live[0].Name != "web" || len(live[0].Object) == 0 {
+		t.Errorf("LiveResources() liefert unvollstaendige Identitaet: %+v", live[0])
 	}
 
 	if err := s.WriteChanges(ctx, []store.Change{
@@ -265,11 +268,11 @@ func TestCurrentAndLiveUIDsTrackDeletion(t *testing.T) {
 	if _, found, _ := s.Current(ctx, uid); found {
 		t.Error("Current() liefert ein geloeschtes Objekt")
 	}
-	live, err = s.LiveUIDs(ctx, "local")
+	live, err = s.LiveResources(ctx, "local")
 	if err != nil {
-		t.Fatalf("LiveUIDs(): %v", err)
+		t.Fatalf("LiveResources(): %v", err)
 	}
-	if _, ok := live[uid]; ok {
-		t.Error("LiveUIDs() enthaelt ein geloeschtes Objekt")
+	if len(live) != 0 {
+		t.Errorf("LiveResources() enthaelt ein geloeschtes Objekt: %+v", live)
 	}
 }

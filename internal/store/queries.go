@@ -40,27 +40,50 @@ func (s *Store) Current(ctx context.Context, uid string) (Snapshot, bool, error)
 	return Snapshot{Hash: hash, Object: object}, true, nil
 }
 
-// LiveUIDs liefert alle UIDs, die noch nicht als geloescht markiert sind.
-// Der Resync nach dem Cache-Sync gleicht damit ab, was waehrend eines
-// Ausfalls verschwunden ist (R13).
-func (s *Store) LiveUIDs(ctx context.Context, cluster string) (map[string]struct{}, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT uid::text FROM resources WHERE cluster = $1 AND deleted_at IS NULL`, cluster)
+// LiveResource ist ein noch nicht als geloescht markiertes Objekt, mit allem,
+// was fuer einen vollwertigen deleted-Eintrag noetig ist.
+type LiveResource struct {
+	UID        string
+	APIGroup   string
+	APIVersion string
+	Kind       string
+	Namespace  string
+	Name       string
+	Hash       string
+	Object     map[string]any
+	Images     []string
+}
+
+// LiveResources liefert alles, was der Store fuer lebendig haelt. Der Resync
+// nach dem Cache-Sync gleicht damit ab, was waehrend eines Ausfalls
+// verschwunden ist (R13).
+func (s *Store) LiveResources(ctx context.Context, cluster string) ([]LiveResource, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT uid::text, api_group, api_version, kind, namespace, name, hash, object, images
+		FROM resources
+		WHERE cluster = $1 AND deleted_at IS NULL`, cluster)
 	if err != nil {
-		return nil, fmt.Errorf("list live uids: %w", err)
+		return nil, fmt.Errorf("list live resources: %w", err)
 	}
 	defer rows.Close()
 
-	out := map[string]struct{}{}
+	var out []LiveResource
 	for rows.Next() {
-		var uid string
-		if err := rows.Scan(&uid); err != nil {
-			return nil, fmt.Errorf("scan live uid: %w", err)
+		var (
+			item LiveResource
+			raw  []byte
+		)
+		if err := rows.Scan(&item.UID, &item.APIGroup, &item.APIVersion, &item.Kind,
+			&item.Namespace, &item.Name, &item.Hash, &raw, &item.Images); err != nil {
+			return nil, fmt.Errorf("scan live resource: %w", err)
 		}
-		out[uid] = struct{}{}
+		if err := json.Unmarshal(raw, &item.Object); err != nil {
+			return nil, fmt.Errorf("decode live resource %s: %w", item.UID, err)
+		}
+		out = append(out, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate live uids: %w", err)
+		return nil, fmt.Errorf("iterate live resources: %w", err)
 	}
 	return out, nil
 }
