@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+patches:
+  # Tilt live_update muss das Binary im Container ersetzen koennen.
+  - target: { kind: Deployment, name: stateinspector }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem
+        value: false
+      - op: replace
+        path: /spec/template/spec/containers/0/args/1
+        value: --leader-elect=false
+  # Postgres-Image laeuft initial als root: im Dev-Namespace nur baseline erzwingen.
+  - target: { kind: Namespace, name: stateinspector }
+    patch: |-
+      - op: replace
+        path: /metadata/labels/pod-security.kubernetes.io~1enforce
+        value: baseline

@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stateinspector
+  labels: { app.kubernetes.io/name: stateinspector }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: stateinspector }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: stateinspector }
+    spec:
+      serviceAccountName: stateinspector
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: stateinspector
+          image: stateinspector
+          args:
+            - --cluster-name=local
+            - --leader-elect
+            - --metrics-bind-address=:8080
+            - --health-probe-bind-address=:8082
+            - --mcp-bind-address=127.0.0.1:8081
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: stateinspector-db, key: DATABASE_URL }
+          ports:
+            - { name: metrics, containerPort: 8080 }
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8082 }
+          readinessProbe:
+            httpGet: { path: /readyz, port: 8082 }
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }

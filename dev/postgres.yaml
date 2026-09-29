@@ -1,0 +1,47 @@
+# Nur lokale Dev-Credentials.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: stateinspector-db
+  namespace: stateinspector
+stringData:
+  POSTGRES_USER: stateinspector
+  POSTGRES_PASSWORD: dev-only
+  POSTGRES_DB: stateinspector
+  DATABASE_URL: postgres://stateinspector:dev-only@postgres.stateinspector.svc:5432/stateinspector?sslmode=disable
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: stateinspector
+spec:
+  selector: { app: postgres }
+  ports: [{ port: 5432, targetPort: 5432 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: stateinspector
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres } }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          envFrom: [{ secretRef: { name: stateinspector-db } }]
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "stateinspector"] }
+            periodSeconds: 5
+          volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }

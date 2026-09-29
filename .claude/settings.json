@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(just:*)",
+      "Bash(go build:*)",
+      "Bash(go test:*)",
+      "Bash(go vet:*)",
+      "Bash(go mod tidy)",
+      "Bash(go tool:*)",
+      "Bash(golangci-lint:*)",
+      "Bash(git status)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)"
+    ],
+    "deny": [
+      "Bash(kubectl:*)",
+      "Bash(helm:*)",
+      "Bash(gcloud:*)",
+      "Bash(az:*)",
+      "Bash(kubectx:*)",
+      "Read(~/.kube/**)",
+      "Read(./.env)"
+    ]
+  }
+}

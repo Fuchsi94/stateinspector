@@ -1,0 +1,6 @@
+# Nur fuer Tilt: Binary wird lokal gebaut und per live_update ersetzt.
+FROM alpine:3.20
+RUN mkdir /app && chown 65532:65532 /app
+COPY --chown=65532:65532 bin/stateinspector /app/stateinspector
+USER 65532:65532
+ENTRYPOINT ["/app/stateinspector"]
