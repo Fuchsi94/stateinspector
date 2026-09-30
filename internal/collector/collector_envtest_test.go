@@ -21,11 +21,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/Fuchsi94/stateinspector/internal/collector"
+	"github.com/Fuchsi94/stateinspector/internal/dbtest"
 	"github.com/Fuchsi94/stateinspector/internal/store"
 )
 
@@ -45,27 +43,16 @@ func TestMain(m *testing.M) {
 	}
 	restConfig = cfg
 
-	container, err := tcpostgres.Run(ctx, "postgres:17-alpine",
-		tcpostgres.WithDatabase("stateinspector"),
-		tcpostgres.WithUsername("stateinspector"),
-		tcpostgres.WithPassword("test"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).WithStartupTimeout(2*time.Minute)),
-	)
+	url, stopPostgres, err := dbtest.StartPostgres(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Postgres starten: %v\n", err)
+		fmt.Fprintln(os.Stderr, err)
 		_ = env.Stop()
 		os.Exit(1)
 	}
-	databaseURL, err = container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Connection-String: %v\n", err)
-		os.Exit(1)
-	}
+	databaseURL = url
 
 	code := m.Run()
-	_ = testcontainers.TerminateContainer(container)
+	stopPostgres()
 	_ = env.Stop()
 	os.Exit(code)
 }
@@ -97,12 +84,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("Migrate(): %v", err)
 	}
 
-	pool, err := pgxpool.New(t.Context(), databaseURL)
-	if err != nil {
-		t.Fatalf("Pruefverbindung: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if _, err := pool.Exec(t.Context(), "TRUNCATE changes, resources"); err != nil {
+	if err := dbtest.Truncate(t.Context(), databaseURL); err != nil {
 		t.Fatalf("Tabellen leeren: %v", err)
 	}
 

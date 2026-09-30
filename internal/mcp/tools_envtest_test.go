@@ -11,12 +11,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/Fuchsi94/stateinspector/internal/dbtest"
 	"github.com/Fuchsi94/stateinspector/internal/mcp"
 	"github.com/Fuchsi94/stateinspector/internal/store"
 )
@@ -29,25 +26,15 @@ var now = time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
-	container, err := tcpostgres.Run(ctx, "postgres:17-alpine",
-		tcpostgres.WithDatabase("stateinspector"),
-		tcpostgres.WithUsername("stateinspector"),
-		tcpostgres.WithPassword("test"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).WithStartupTimeout(2*time.Minute)),
-	)
+	url, stop, err := dbtest.StartPostgres(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Postgres-Container starten: %v\n", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	databaseURL, err = container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Connection-String: %v\n", err)
-		os.Exit(1)
-	}
+	databaseURL = url
+
 	code := m.Run()
-	_ = testcontainers.TerminateContainer(container)
+	stop()
 	os.Exit(code)
 }
 
@@ -64,7 +51,9 @@ func session(t *testing.T, seed ...store.Change) *mcpsdk.ClientSession {
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate(): %v", err)
 	}
-	truncate(t)
+	if err := dbtest.Truncate(ctx, databaseURL); err != nil {
+		t.Fatalf("Tabellen leeren: %v", err)
+	}
 	if len(seed) > 0 {
 		if err := db.WriteChanges(ctx, seed); err != nil {
 			t.Fatalf("Seed schreiben: %v", err)
@@ -85,20 +74,6 @@ func session(t *testing.T, seed ...store.Change) *mcpsdk.ClientSession {
 	}
 	t.Cleanup(func() { _ = sess.Close() })
 	return sess
-}
-
-// truncate raeumt ueber eine eigene Verbindung auf: der Store kennt bewusst
-// kein Loeschen, und die Tests sollen ihn nicht dazu zwingen.
-func truncate(t *testing.T) {
-	t.Helper()
-	pool, err := pgxpool.New(t.Context(), databaseURL)
-	if err != nil {
-		t.Fatalf("Pruefverbindung oeffnen: %v", err)
-	}
-	defer pool.Close()
-	if _, err := pool.Exec(t.Context(), "TRUNCATE changes, resources"); err != nil {
-		t.Fatalf("Tabellen leeren: %v", err)
-	}
 }
 
 func call(t *testing.T, sess *mcpsdk.ClientSession, tool string, args map[string]any, out any) {
@@ -152,8 +127,8 @@ func TestListChangesRespectsWindowAndOmitsObject(t *testing.T) {
 	)
 
 	var out struct {
-		Changes []map[string]any `json:"changes"`
-		Truncated bool           `json:"truncated"`
+		Changes   []map[string]any `json:"changes"`
+		Truncated bool             `json:"truncated"`
 	}
 	call(t, sess, "list_changes", map[string]any{"since": "24h"}, &out)
 

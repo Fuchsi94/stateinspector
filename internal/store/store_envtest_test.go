@@ -11,10 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/testcontainers/testcontainers-go"
-	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
-	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/Fuchsi94/stateinspector/internal/dbtest"
 	"github.com/Fuchsi94/stateinspector/internal/store"
 )
 
@@ -22,26 +20,15 @@ var databaseURL string
 
 func TestMain(m *testing.M) {
 	ctx := context.Background()
-	container, err := tcpostgres.Run(ctx, "postgres:17-alpine",
-		tcpostgres.WithDatabase("stateinspector"),
-		tcpostgres.WithUsername("stateinspector"),
-		tcpostgres.WithPassword("test"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("database system is ready to accept connections").
-				WithOccurrence(2).WithStartupTimeout(2*time.Minute)),
-	)
+	url, stop, err := dbtest.StartPostgres(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Postgres-Container starten: %v\n", err)
+		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	databaseURL, err = container.ConnectionString(ctx, "sslmode=disable")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Connection-String: %v\n", err)
-		os.Exit(1)
-	}
+	databaseURL = url
 
 	code := m.Run()
-	_ = testcontainers.TerminateContainer(container)
+	stop()
 	os.Exit(code)
 }
 
@@ -58,7 +45,7 @@ func freshStore(t *testing.T) *store.Store {
 	if err := s.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate(): %v", err)
 	}
-	if _, err := assertPool(t).Exec(ctx, "TRUNCATE changes, resources"); err != nil {
+	if err := dbtest.Truncate(ctx, databaseURL); err != nil {
 		t.Fatalf("Tabellen leeren: %v", err)
 	}
 	return s
@@ -232,7 +219,7 @@ func TestObjectAtAfterDeletionReturnsNothing(t *testing.T) {
 	}
 }
 
-func TestCurrentAndLiveResourcesTrackDeletion(t *testing.T) {
+func TestCurrentAndLiveUIDsTrackDeletion(t *testing.T) {
 	ctx := t.Context()
 	s := freshStore(t)
 
@@ -249,15 +236,24 @@ func TestCurrentAndLiveResourcesTrackDeletion(t *testing.T) {
 	if snap.Hash != "nginx:1.27" {
 		t.Errorf("Current().Hash = %q, want nginx:1.27", snap.Hash)
 	}
-	live, err := s.LiveResources(ctx, "local")
+	live, err := s.LiveUIDs(ctx, "local")
 	if err != nil {
-		t.Fatalf("LiveResources(): %v", err)
+		t.Fatalf("LiveUIDs(): %v", err)
 	}
-	if len(live) != 1 || live[0].UID != uid {
-		t.Fatalf("LiveResources() = %+v, want genau das lebende Objekt", live)
+	if len(live) != 1 || live[0] != uid {
+		t.Fatalf("LiveUIDs() = %v, want genau das lebende Objekt", live)
 	}
-	if live[0].Kind != "Deployment" || live[0].Name != "web" || len(live[0].Object) == 0 {
-		t.Errorf("LiveResources() liefert unvollstaendige Identitaet: %+v", live[0])
+
+	// Der Resync laedt die vollen Objekte nur fuer die verschwundenen UIDs.
+	full, err := s.ResourcesByUID(ctx, "local", live)
+	if err != nil {
+		t.Fatalf("ResourcesByUID(): %v", err)
+	}
+	if len(full) != 1 || full[0].Kind != "Deployment" || full[0].Name != "web" || len(full[0].Object) == 0 {
+		t.Errorf("ResourcesByUID() liefert unvollstaendige Identitaet: %+v", full)
+	}
+	if empty, err := s.ResourcesByUID(ctx, "local", nil); err != nil || len(empty) != 0 {
+		t.Errorf("ResourcesByUID(nil) = %+v, err=%v; want leer ohne Query", empty, err)
 	}
 
 	if err := s.WriteChanges(ctx, []store.Change{
@@ -268,11 +264,11 @@ func TestCurrentAndLiveResourcesTrackDeletion(t *testing.T) {
 	if _, found, _ := s.Current(ctx, uid); found {
 		t.Error("Current() liefert ein geloeschtes Objekt")
 	}
-	live, err = s.LiveResources(ctx, "local")
+	live, err = s.LiveUIDs(ctx, "local")
 	if err != nil {
-		t.Fatalf("LiveResources(): %v", err)
+		t.Fatalf("LiveUIDs(): %v", err)
 	}
 	if len(live) != 0 {
-		t.Errorf("LiveResources() enthaelt ein geloeschtes Objekt: %+v", live)
+		t.Errorf("LiveUIDs() enthaelt ein geloeschtes Objekt: %v", live)
 	}
 }

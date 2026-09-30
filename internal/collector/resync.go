@@ -10,9 +10,12 @@ import (
 	"github.com/Fuchsi94/stateinspector/internal/store"
 )
 
-// Lister ist der Ausschnitt des Stores, den der Sweep braucht.
+// Lister ist der Ausschnitt des Stores, den der Sweep braucht. Bewusst zwei
+// Schritte: der Abgleich braucht nur Schluessel, die vollen Objekte erst fuer
+// die wenigen, die wirklich fehlen.
 type Lister interface {
-	LiveResources(ctx context.Context, cluster string) ([]store.LiveResource, error)
+	LiveUIDs(ctx context.Context, cluster string) ([]string, error)
+	ResourcesByUID(ctx context.Context, cluster string, uids []string) ([]store.LiveResource, error)
 }
 
 // SweeperOptions konfiguriert den Abgleich nach dem Cache-Sync.
@@ -43,16 +46,28 @@ func NewSweeper(opts SweeperOptions) *Sweeper {
 func (s *Sweeper) Sweep(ctx context.Context, present map[string]struct{}) error {
 	logger := log.FromContext(ctx).WithName("resync")
 
-	live, err := s.opts.Lister.LiveResources(ctx, s.opts.Cluster)
+	live, err := s.opts.Lister.LiveUIDs(ctx, s.opts.Cluster)
 	if err != nil {
-		return fmt.Errorf("load live resources: %w", err)
+		return fmt.Errorf("load live uids: %w", err)
+	}
+
+	var missing []string
+	for _, uid := range live {
+		if _, stillThere := present[uid]; !stillThere {
+			missing = append(missing, uid)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	vanished, err := s.opts.Lister.ResourcesByUID(ctx, s.opts.Cluster, missing)
+	if err != nil {
+		return fmt.Errorf("load vanished resources: %w", err)
 	}
 
 	observedAt := s.opts.Now()
-	for _, resource := range live {
-		if _, stillThere := present[resource.UID]; stillThere {
-			continue
-		}
+	for _, resource := range vanished {
 		logger.Info("waehrend des Ausfalls geloescht",
 			"gvk", resource.Kind, "namespace", resource.Namespace,
 			"name", resource.Name, "uid", resource.UID)

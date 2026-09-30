@@ -114,6 +114,12 @@ func (r *Runner) Start(ctx context.Context) error {
 }
 
 // presentUIDs liest aus dem bereits gesyncten Cache, was es aktuell gibt.
+//
+// cache.List kopiert jedes Objekt tief, obwohl hier nur UID und Namespace
+// gelesen werden. Der Informer-Store ohne Kopie waere billiger, ist ueber
+// cache.Informer aber nicht erreichbar - nur per Type-Assertion auf
+// toolscache.SharedIndexInformer, und das koppelt an Interna fuer eine
+// Ersparnis, die einmal pro Start anfaellt.
 func (r *Runner) presentUIDs(ctx context.Context) (map[string]struct{}, error) {
 	present := map[string]struct{}{}
 	for _, gvk := range Watched {

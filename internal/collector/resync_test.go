@@ -9,14 +9,38 @@ import (
 	"github.com/Fuchsi94/stateinspector/internal/store"
 )
 
-// fakeLister liefert dem Sweep den gespeicherten Stand.
+// fakeLister liefert dem Sweep den gespeicherten Stand und haelt fest, fuer
+// welche UIDs die vollen Objekte nachgeladen wurden.
 type fakeLister struct {
-	live []store.LiveResource
-	err  error
+	live       []store.LiveResource
+	err        error
+	fetchedFor []string
 }
 
-func (f *fakeLister) LiveResources(context.Context, string) ([]store.LiveResource, error) {
-	return f.live, f.err
+func (f *fakeLister) LiveUIDs(context.Context, string) ([]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	uids := make([]string, 0, len(f.live))
+	for _, r := range f.live {
+		uids = append(uids, r.UID)
+	}
+	return uids, nil
+}
+
+func (f *fakeLister) ResourcesByUID(_ context.Context, _ string, uids []string) ([]store.LiveResource, error) {
+	f.fetchedFor = append(f.fetchedFor, uids...)
+	wanted := map[string]struct{}{}
+	for _, uid := range uids {
+		wanted[uid] = struct{}{}
+	}
+	var out []store.LiveResource
+	for _, r := range f.live {
+		if _, ok := wanted[r.UID]; ok {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }
 
 func liveResource(uid, name string) store.LiveResource {
@@ -63,6 +87,10 @@ func TestSweepMarksVanishedResourcesDeletedOffline(t *testing.T) {
 	if got[0].Name != "api" {
 		t.Errorf("Name = %q, want api", got[0].Name)
 	}
+	// Nur das Fehlende wird nachgeladen, nicht der ganze Cluster.
+	if len(lister.fetchedFor) != 1 || lister.fetchedFor[0] != "22222222-2222-2222-2222-222222222222" {
+		t.Errorf("volle Objekte geladen fuer %v, want nur die verschwundene UID", lister.fetchedFor)
+	}
 	if len(got[0].Object) == 0 {
 		t.Error("Object ist leer; der letzte bekannte Zustand fehlt")
 	}
@@ -79,6 +107,9 @@ func TestSweepWithNothingMissingProducesNoChange(t *testing.T) {
 	}
 	if got := drain(t, out); len(got) != 0 {
 		t.Errorf("%d Aenderungen, want 0: %+v", len(got), got)
+	}
+	if len(lister.fetchedFor) != 0 {
+		t.Errorf("volle Objekte geladen fuer %v, obwohl nichts fehlt", lister.fetchedFor)
 	}
 }
 

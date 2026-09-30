@@ -1,9 +1,6 @@
 package normalize
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"sort"
 
@@ -96,11 +93,10 @@ func summarizeData(field string) Rule {
 		}
 		sort.Strings(keys)
 
-		canonical, err := json.Marshal(data)
+		sum, err := Hash(data)
 		if err != nil {
-			return fmt.Errorf("canonicalize %s: %w", field, err)
+			return fmt.Errorf("summarize %s: %w", field, err)
 		}
-		sum := sha256.Sum256(canonical)
 
 		asAny := make([]any, len(keys))
 		for i, key := range keys {
@@ -108,7 +104,7 @@ func summarizeData(field string) Rule {
 		}
 		obj[field] = map[string]any{
 			"keys":   asAny,
-			"sha256": hex.EncodeToString(sum[:]),
+			"sha256": sum,
 		}
 		return nil
 	}

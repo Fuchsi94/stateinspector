@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -123,7 +124,9 @@ func waitForImageChange(t *testing.T, sess *mcpsdk.ClientSession, image string, 
 	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, change := range listChanges(t, sess, "5m") {
-			if change.ChangeType != "updated" || !hasPath(change, imagePath) || !hasImage(change, image) {
+			if change.ChangeType != "updated" ||
+				!slices.Contains(change.ChangedPaths, imagePath) ||
+				!slices.Contains(change.Images, image) {
 				continue
 			}
 			observed, err := time.Parse(time.RFC3339, change.ObservedAt)
@@ -139,24 +142,6 @@ func waitForImageChange(t *testing.T, sess *mcpsdk.ClientSession, image string, 
 	t.Fatalf("kein updated-Eintrag mit %s und Image %q nach %s innerhalb von 90s",
 		imagePath, image, after.Format(time.RFC3339Nano))
 	return changeView{}
-}
-
-func hasPath(change changeView, want string) bool {
-	for _, got := range change.ChangedPaths {
-		if got == want {
-			return true
-		}
-	}
-	return false
-}
-
-func hasImage(change changeView, want string) bool {
-	for _, got := range change.Images {
-		if got == want {
-			return true
-		}
-	}
-	return false
 }
 
 // otherImage liefert ein Image, das sich vom aktuellen unterscheidet. Ein
@@ -190,13 +175,7 @@ func TestImageChangeShowsUpInListChanges(t *testing.T) {
 	if change.Namespace != "demo" || change.Name != "web" {
 		t.Errorf("falsches Objekt: %s/%s", change.Namespace, change.Name)
 	}
-	var sawImagePath bool
-	for _, path := range change.ChangedPaths {
-		if path == imagePath {
-			sawImagePath = true
-		}
-	}
-	if !sawImagePath {
+	if !slices.Contains(change.ChangedPaths, imagePath) {
 		t.Errorf("changed_paths = %v, want den Image-Pfad %s", change.ChangedPaths, imagePath)
 	}
 }

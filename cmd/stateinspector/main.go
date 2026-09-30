@@ -14,7 +14,6 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -179,7 +178,7 @@ func (g *readyGate) check(_ *http.Request) error {
 // und der Go-Typ die Art damit nicht mehr verraet (KTD7).
 func cacheByObject() map[client.Object]cache.ByObject {
 	configMap := &unstructured.Unstructured{}
-	configMap.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"})
+	configMap.SetGroupVersionKind(collector.ConfigMapGVK)
 	return map[client.Object]cache.ByObject{
 		configMap: {Transform: collector.StripConfigMapValues},
 	}

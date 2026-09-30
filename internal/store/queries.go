@@ -54,16 +54,42 @@ type LiveResource struct {
 	Images     []string
 }
 
-// LiveResources liefert alles, was der Store fuer lebendig haelt. Der Resync
-// nach dem Cache-Sync gleicht damit ab, was waehrend eines Ausfalls
-// verschwunden ist (R13).
-func (s *Store) LiveResources(ctx context.Context, cluster string) ([]LiveResource, error) {
+// LiveUIDs liefert nur die Schluessel dessen, was der Store fuer lebendig
+// haelt. Der Resync vergleicht damit gegen den Cache; die vollen Objekte holt
+// er anschliessend nur fuer die wenigen, die wirklich verschwunden sind.
+func (s *Store) LiveUIDs(ctx context.Context, cluster string) ([]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT uid::text FROM resources WHERE cluster = $1 AND deleted_at IS NULL`, cluster)
+	if err != nil {
+		return nil, fmt.Errorf("list live uids: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err != nil {
+			return nil, fmt.Errorf("scan live uid: %w", err)
+		}
+		out = append(out, uid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate live uids: %w", err)
+	}
+	return out, nil
+}
+
+// ResourcesByUID liefert die vollen Objekte zu einer UID-Liste.
+func (s *Store) ResourcesByUID(ctx context.Context, cluster string, uids []string) ([]LiveResource, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT uid::text, api_group, api_version, kind, namespace, name, hash, object, images
 		FROM resources
-		WHERE cluster = $1 AND deleted_at IS NULL`, cluster)
+		WHERE cluster = $1 AND uid = ANY($2::uuid[])`, cluster, uids)
 	if err != nil {
-		return nil, fmt.Errorf("list live resources: %w", err)
+		return nil, fmt.Errorf("load resources by uid: %w", err)
 	}
 	defer rows.Close()
 
@@ -75,15 +101,15 @@ func (s *Store) LiveResources(ctx context.Context, cluster string) ([]LiveResour
 		)
 		if err := rows.Scan(&item.UID, &item.APIGroup, &item.APIVersion, &item.Kind,
 			&item.Namespace, &item.Name, &item.Hash, &raw, &item.Images); err != nil {
-			return nil, fmt.Errorf("scan live resource: %w", err)
+			return nil, fmt.Errorf("scan resource: %w", err)
 		}
 		if err := json.Unmarshal(raw, &item.Object); err != nil {
-			return nil, fmt.Errorf("decode live resource %s: %w", item.UID, err)
+			return nil, fmt.Errorf("decode resource %s: %w", item.UID, err)
 		}
 		out = append(out, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate live resources: %w", err)
+		return nil, fmt.Errorf("iterate resources: %w", err)
 	}
 	return out, nil
 }
@@ -91,6 +117,9 @@ func (s *Store) LiveResources(ctx context.Context, cluster string) ([]LiveResour
 // WriteChanges schreibt einen Stapel in einer Transaktion: jede Version nach
 // changes, der abgeleitete Stand nach resources. Entweder alles oder nichts,
 // damit resources nie einen Stand zeigt, zu dem die Version fehlt.
+//
+// Die Statements gehen als Batch raus. Einzeln waeren es zwei Round-Trips pro
+// Eintrag, also bis zu 200 pro Flush.
 func (s *Store) WriteChanges(ctx context.Context, changes []Change) error {
 	if len(changes) == 0 {
 		return nil
@@ -101,6 +130,7 @@ func (s *Store) WriteChanges(ctx context.Context, changes []Change) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	batch := &pgx.Batch{}
 	for _, c := range changes {
 		object, err := json.Marshal(c.Object)
 		if err != nil {
@@ -114,6 +144,10 @@ func (s *Store) WriteChanges(ctx context.Context, changes []Change) error {
 		if c.Owner != "" {
 			owner = c.Owner
 		}
+		var deletedAt any
+		if c.Type == Deleted {
+			deletedAt = c.ObservedAt.UTC()
+		}
 		images := c.Images
 		if images == nil {
 			images = []string{}
@@ -124,48 +158,34 @@ func (s *Store) WriteChanges(ctx context.Context, changes []Change) error {
 		}
 
 		// actor bleibt bewusst unbesetzt: die Audit-Log-Anbindung ist ein Nicht-Ziel.
-		if _, err := tx.Exec(ctx, `
+		batch.Queue(`
 			INSERT INTO changes (uid, cluster, api_group, kind, namespace, name,
 			                     change_type, offline, observed_at, hash, object,
 			                     patch, changed_paths, images, owner)
 			VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
 			c.UID, c.Cluster, c.APIGroup, c.Kind, c.Namespace, c.Name,
 			string(c.Type), c.Offline, c.ObservedAt.UTC(), c.Hash, object,
-			patch, paths, images, owner,
-		); err != nil {
-			return fmt.Errorf("insert change for %s/%s: %w", c.Namespace, c.Name, err)
-		}
+			patch, paths, images, owner)
 
-		if err := upsertResource(ctx, tx, c, object, images); err != nil {
-			return err
-		}
+		batch.Queue(`
+			INSERT INTO resources (uid, cluster, api_group, api_version, kind, namespace, name,
+			                       hash, object, images, first_seen, last_changed, deleted_at)
+			VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $12)
+			ON CONFLICT (uid) DO UPDATE SET
+				hash         = EXCLUDED.hash,
+				object       = EXCLUDED.object,
+				images       = EXCLUDED.images,
+				last_changed = EXCLUDED.last_changed,
+				deleted_at   = EXCLUDED.deleted_at`,
+			c.UID, c.Cluster, c.APIGroup, c.APIVersion, c.Kind, c.Namespace, c.Name,
+			c.Hash, object, images, c.ObservedAt.UTC(), deletedAt)
 	}
 
+	if err := tx.SendBatch(ctx, batch).Close(); err != nil {
+		return fmt.Errorf("write change batch: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit changes: %w", err)
-	}
-	return nil
-}
-
-func upsertResource(ctx context.Context, tx pgx.Tx, c Change, object []byte, images []string) error {
-	var deletedAt any
-	if c.Type == Deleted {
-		deletedAt = c.ObservedAt.UTC()
-	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO resources (uid, cluster, api_group, api_version, kind, namespace, name,
-		                       hash, object, images, first_seen, last_changed, deleted_at)
-		VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11, $12)
-		ON CONFLICT (uid) DO UPDATE SET
-			hash         = EXCLUDED.hash,
-			object       = EXCLUDED.object,
-			images       = EXCLUDED.images,
-			last_changed = EXCLUDED.last_changed,
-			deleted_at   = EXCLUDED.deleted_at`,
-		c.UID, c.Cluster, c.APIGroup, c.APIVersion, c.Kind, c.Namespace, c.Name,
-		c.Hash, object, images, c.ObservedAt.UTC(), deletedAt,
-	); err != nil {
-		return fmt.Errorf("upsert resource for %s/%s: %w", c.Namespace, c.Name, err)
 	}
 	return nil
 }
@@ -293,20 +313,7 @@ func (s *Store) ListResources(ctx context.Context, cluster, kind, namespace stri
 	}
 	defer rows.Close()
 
-	var out []ResourceSummary
-	for rows.Next() {
-		var item ResourceSummary
-		if err := rows.Scan(&item.Kind, &item.Namespace, &item.Name, &item.Images,
-			&item.LastChanged, &item.DeletedAt); err != nil {
-			return nil, fmt.Errorf("scan resource: %w", err)
-		}
-		item.LastChanged = item.LastChanged.UTC()
-		out = append(out, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate resources: %w", err)
-	}
-	return out, nil
+	return scanResourceSummaries(rows)
 }
 
 // CurrentWorkloads liefert lebende Objekte mit ihren Images; das beantwortet
@@ -328,18 +335,24 @@ func (s *Store) CurrentWorkloads(ctx context.Context, cluster, namespace, nameCo
 	}
 	defer rows.Close()
 
+	return scanResourceSummaries(rows)
+}
+
+// scanResourceSummaries liest die Spaltenfolge, die sich ListResources und
+// CurrentWorkloads teilen.
+func scanResourceSummaries(rows pgx.Rows) ([]ResourceSummary, error) {
 	var out []ResourceSummary
 	for rows.Next() {
 		var item ResourceSummary
 		if err := rows.Scan(&item.Kind, &item.Namespace, &item.Name, &item.Images,
 			&item.LastChanged, &item.DeletedAt); err != nil {
-			return nil, fmt.Errorf("scan workload: %w", err)
+			return nil, fmt.Errorf("scan resource summary: %w", err)
 		}
 		item.LastChanged = item.LastChanged.UTC()
 		out = append(out, item)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate workloads: %w", err)
+		return nil, fmt.Errorf("iterate resource summaries: %w", err)
 	}
 	return out, nil
 }

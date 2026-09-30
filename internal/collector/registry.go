@@ -21,6 +21,11 @@ var Watched = []schema.GroupVersionKind{
 	{Group: "apps", Version: "v1", Kind: "StatefulSet"},
 	{Group: "apps", Version: "v1", Kind: "DaemonSet"},
 	{Group: "", Version: "v1", Kind: "Service"},
-	{Group: "", Version: "v1", Kind: "ConfigMap"},
+	ConfigMapGVK,
 	{Group: "networking.k8s.io", Version: "v1", Kind: "Ingress"},
 }
+
+// ConfigMapGVK ist einzeln benannt, weil der Cache-Transform sie braucht.
+// Eine zweite literale Kopie im Manager-Setup koennte still von der Registry
+// abdriften - anders als beim RBAC faenge das kein Test ab.
+var ConfigMapGVK = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "ConfigMap"}

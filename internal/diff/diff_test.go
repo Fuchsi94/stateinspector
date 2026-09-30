@@ -1,6 +1,7 @@
 package diff_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Fuchsi94/stateinspector/internal/diff"
@@ -120,14 +121,5 @@ func TestChangedPathsAreUniqueAndSorted(t *testing.T) {
 }
 
 func containsOp(patch, op string) bool {
-	return len(patch) > 0 && (indexOf(patch, `"op":"`+op+`"`) >= 0 || indexOf(patch, `"op": "`+op+`"`) >= 0)
-}
-
-func indexOf(haystack, needle string) int {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
+	return strings.Contains(patch, `"op":"`+op+`"`) || strings.Contains(patch, `"op": "`+op+`"`)
 }
