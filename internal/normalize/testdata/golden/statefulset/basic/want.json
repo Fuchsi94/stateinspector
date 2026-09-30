@@ -1,0 +1,14 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "StatefulSet",
+  "metadata": { "name": "db", "namespace": "demo" },
+  "spec": {
+    "serviceName": "db",
+    "replicas": 1,
+    "selector": { "matchLabels": { "app": "db" } },
+    "template": {
+      "metadata": { "labels": { "app": "db" } },
+      "spec": { "containers": [ { "name": "postgres", "image": "postgres:17-alpine" } ] }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+  namespace: demo
+  uid: 55555555-5555-5555-5555-555555555555
+  resourceVersion: "888"
+  generation: 8
+  creationTimestamp: "2026-09-01T10:00:00Z"
+spec:
+  serviceName: db
+  replicas: 1
+  selector:
+    matchLabels: { app: db }
+  template:
+    metadata:
+      labels: { app: db }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+status:
+  readyReplicas: 0

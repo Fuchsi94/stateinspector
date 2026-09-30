@@ -24,8 +24,9 @@ const maxResults = 500
 type Backend interface {
 	ListChanges(ctx context.Context, f store.ChangeFilter) ([]store.ChangeSummary, error)
 	ObjectAt(ctx context.Context, cluster, kind, namespace, name string, at time.Time) (map[string]any, time.Time, bool, error)
-	ListResources(ctx context.Context, cluster, kind, namespace string, includeDeleted bool, limit int) ([]store.ResourceSummary, error)
+	ListResources(ctx context.Context, cluster, kind, namespace, nameContains string, includeDeleted bool, limit int) ([]store.ResourceSummary, error)
 	CurrentWorkloads(ctx context.Context, cluster, namespace, nameContains string, limit int) ([]store.ResourceSummary, error)
+	CountChangesBetween(ctx context.Context, cluster, kind, namespace, name string, from, to time.Time) (int, error)
 }
 
 // ChangeView ist ein Eintrag in list_changes.
@@ -36,8 +37,9 @@ type ChangeView struct {
 	Kind         string   `json:"kind"`
 	Namespace    string   `json:"namespace"`
 	Name         string   `json:"name"`
-	ChangedPaths []string `json:"changed_paths"`
-	Images       []string `json:"images"`
+	ChangedPaths []string `json:"changed_paths,omitempty"`
+	Images       []string `json:"images,omitempty"`
+	Owner        string   `json:"owner,omitempty"`
 }
 
 // ResourceView beschreibt ein beobachtetes Objekt.
@@ -56,7 +58,7 @@ type listChangesIn struct {
 	Namespace string `json:"namespace,omitempty" jsonschema:"Nur dieser Namespace."`
 	Kind      string `json:"kind,omitempty" jsonschema:"Nur diese Art, z.B. Deployment, Service, Ingress, ConfigMap."`
 	Name      string `json:"name,omitempty" jsonschema:"Nur dieses Objekt (exakter Name)."`
-	Limit     int    `json:"limit,omitempty" jsonschema:"Hoechstzahl Eintraege, Standard 50, Maximum 500."`
+	Limit     int    `json:"limit,omitempty" jsonschema:"Hoechstzahl Eintraege, Standard 50, Maximum 500. Wird gekappt, wenn groesser."`
 }
 
 type listChangesOut struct {
@@ -91,14 +93,17 @@ type diffResourceOut struct {
 	Found          bool     `json:"found"`
 	FromObservedAt string   `json:"from_observed_at,omitempty"`
 	ToObservedAt   string   `json:"to_observed_at,omitempty"`
-	Patch          any      `json:"patch,omitempty"`
+	Patch          any      `json:"patch,omitempty" jsonschema:"RFC-6902-Patch als Liste von Operationen (op, path, value), der von 'from' nach 'to' fuehrt. Fehlt, wenn sich nichts geaendert hat."`
 	ChangedPaths   []string `json:"changed_paths,omitempty"`
-	Note           string   `json:"note,omitempty"`
+	// ChangesInWindow macht sichtbar, wenn das Fenster mehrere Rollouts umfasst.
+	ChangesInWindow int    `json:"changes_in_window,omitempty"`
+	Note            string `json:"note,omitempty"`
 }
 
 type getVersionsIn struct {
 	Namespace    string `json:"namespace,omitempty" jsonschema:"Nur dieser Namespace."`
 	NameContains string `json:"name_contains,omitempty" jsonschema:"Nur Objekte, deren Name diesen Text enthaelt."`
+	Limit        int    `json:"limit,omitempty" jsonschema:"Hoechstzahl Eintraege, Standard und Maximum 500."`
 }
 
 type getVersionsOut struct {
@@ -110,7 +115,9 @@ type getVersionsOut struct {
 type listResourcesIn struct {
 	Kind           string `json:"kind,omitempty" jsonschema:"Nur diese Art."`
 	Namespace      string `json:"namespace,omitempty" jsonschema:"Nur dieser Namespace."`
+	NameContains   string `json:"name_contains,omitempty" jsonschema:"Nur Objekte, deren Name diesen Text enthaelt."`
 	IncludeDeleted bool   `json:"include_deleted,omitempty" jsonschema:"Geloeschte Objekte mit auflisten. Standard false."`
+	Limit          int    `json:"limit,omitempty" jsonschema:"Hoechstzahl Eintraege, Standard und Maximum 500."`
 }
 
 type listResourcesOut struct {
@@ -142,7 +149,10 @@ func (s *Server) register(srv *mcpsdk.Server) {
 		Name: "diff_resource",
 		Description: "Liefert den Unterschied eines Objekts zwischen zwei Zeitpunkten als " +
 			"RFC-6902-Patch plus Liste der geaenderten Pfade. Nimm dieses Tool fuer " +
-			"'was genau wurde beim letzten Rollout geaendert'.",
+			"'was genau wurde beim letzten Rollout geaendert'. Achtung: der Patch " +
+			"vergleicht nur Anfang und Ende des Fensters. Liegen mehrere Aenderungen " +
+			"darin, meldet changes_in_window das; fuer genau den letzten Rollout hole " +
+			"den vorletzten observed_at per list_changes und setze ihn als 'from'.",
 	}, s.diffResource)
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
@@ -200,7 +210,7 @@ func (s *Server) listChanges(ctx context.Context, _ *mcpsdk.CallToolRequest, in 
 		out.Changes = append(out.Changes, ChangeView{
 			ObservedAt: row.ObservedAt.Format(time.RFC3339Nano), ChangeType: string(row.Type),
 			Offline: row.Offline, Kind: row.Kind, Namespace: row.Namespace, Name: row.Name,
-			ChangedPaths: row.ChangedPaths, Images: row.Images,
+			ChangedPaths: row.ChangedPaths, Images: row.Images, Owner: row.Owner,
 		})
 	}
 	return nil, out, nil
@@ -252,20 +262,39 @@ func (s *Server) diffResource(ctx context.Context, _ *mcpsdk.CallToolRequest, in
 		return nil, diffResourceOut{}, err
 	}
 	if !beforeFound || !afterFound {
+		// Benennen, welche Seite fehlt - sonst weiss das Modell nicht, in
+		// welche Richtung es das Fenster verschieben muss.
+		missing := fmt.Sprintf("am %s (from)", from.Format(time.RFC3339Nano))
+		switch {
+		case beforeFound && !afterFound:
+			missing = fmt.Sprintf("am %s (to)", to.Format(time.RFC3339Nano))
+		case !beforeFound && !afterFound:
+			missing = fmt.Sprintf("weder am %s (from) noch am %s (to)",
+				from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+		}
 		return nil, diffResourceOut{Note: fmt.Sprintf(
-			"%s %s/%s existierte zu mindestens einem der beiden Zeitpunkte nicht.",
-			in.Kind, in.Namespace, in.Name)}, nil
+			"%s %s/%s existierte %s nicht.", in.Kind, in.Namespace, in.Name, missing)}, nil
 	}
 
 	result, err := diff.Between(before, after)
 	if err != nil {
 		return nil, diffResourceOut{}, err
 	}
+	count, err := s.backend.CountChangesBetween(ctx, s.cluster, in.Kind, in.Namespace, in.Name, beforeAt, to)
+	if err != nil {
+		return nil, diffResourceOut{}, err
+	}
+
 	out := diffResourceOut{
-		Found:          true,
-		FromObservedAt: beforeAt.Format(time.RFC3339Nano),
-		ToObservedAt:   afterAt.Format(time.RFC3339Nano),
-		ChangedPaths:   result.ChangedPaths,
+		Found:           true,
+		FromObservedAt:  beforeAt.Format(time.RFC3339Nano),
+		ToObservedAt:    afterAt.Format(time.RFC3339Nano),
+		ChangedPaths:    result.ChangedPaths,
+		ChangesInWindow: count,
+	}
+	if count > 1 {
+		out.Note = fmt.Sprintf("Das Fenster enthaelt %d Aenderungen; der Patch fasst sie zusammen. "+
+			"Fuer genau die letzte: observed_at der vorletzten per list_changes holen und als 'from' setzen.", count)
 	}
 	if len(result.Patch) > 0 {
 		out.Patch = result.Patch
@@ -277,12 +306,12 @@ func (s *Server) diffResource(ctx context.Context, _ *mcpsdk.CallToolRequest, in
 }
 
 func (s *Server) getVersions(ctx context.Context, _ *mcpsdk.CallToolRequest, in getVersionsIn) (*mcpsdk.CallToolResult, getVersionsOut, error) {
-	rows, err := s.backend.CurrentWorkloads(ctx, s.cluster, in.Namespace, in.NameContains, maxResults+1)
+	rows, err := s.backend.CurrentWorkloads(ctx, s.cluster, in.Namespace, in.NameContains, effectiveLimit(in.Limit)+1)
 	if err != nil {
 		return nil, getVersionsOut{}, err
 	}
 	out := getVersionsOut{Workloads: []ResourceView{}}
-	rows, out.Truncated, out.Note = capRows(rows)
+	rows, out.Truncated, out.Note = capRows(rows, effectiveLimit(in.Limit))
 	for _, row := range rows {
 		out.Workloads = append(out.Workloads, view(row))
 	}
@@ -290,25 +319,33 @@ func (s *Server) getVersions(ctx context.Context, _ *mcpsdk.CallToolRequest, in 
 }
 
 func (s *Server) listResources(ctx context.Context, _ *mcpsdk.CallToolRequest, in listResourcesIn) (*mcpsdk.CallToolResult, listResourcesOut, error) {
-	rows, err := s.backend.ListResources(ctx, s.cluster, in.Kind, in.Namespace, in.IncludeDeleted, maxResults+1)
+	rows, err := s.backend.ListResources(ctx, s.cluster, in.Kind, in.Namespace, in.NameContains, in.IncludeDeleted, effectiveLimit(in.Limit)+1)
 	if err != nil {
 		return nil, listResourcesOut{}, err
 	}
 	out := listResourcesOut{Resources: []ResourceView{}}
-	rows, out.Truncated, out.Note = capRows(rows)
+	rows, out.Truncated, out.Note = capRows(rows, effectiveLimit(in.Limit))
 	for _, row := range rows {
 		out.Resources = append(out.Resources, view(row))
 	}
 	return nil, out, nil
 }
 
-// capRows schneidet auf maxResults und meldet, dass abgeschnitten wurde.
-func capRows(rows []store.ResourceSummary) ([]store.ResourceSummary, bool, string) {
-	if len(rows) <= maxResults {
+// effectiveLimit haelt jedes Tool an dieselbe Obergrenze.
+func effectiveLimit(requested int) int {
+	if requested <= 0 || requested > maxResults {
+		return maxResults
+	}
+	return requested
+}
+
+// capRows schneidet auf das Limit und meldet, dass abgeschnitten wurde.
+func capRows(rows []store.ResourceSummary, limit int) ([]store.ResourceSummary, bool, string) {
+	if len(rows) <= limit {
 		return rows, false, ""
 	}
-	return rows[:maxResults], true, fmt.Sprintf(
-		"Bei %d Eintraegen abgeschnitten; es gibt mehr. Grenze Namespace oder Art ein.", maxResults)
+	return rows[:limit], true, fmt.Sprintf(
+		"Bei %d Eintraegen abgeschnitten; es gibt mehr. Grenze Namespace, Art oder Name ein.", limit)
 }
 
 func view(row store.ResourceSummary) ResourceView {

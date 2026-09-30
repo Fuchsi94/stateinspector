@@ -16,15 +16,20 @@ type Snapshot struct {
 	Object map[string]any
 }
 
-// Current liefert den aktuellen Stand zu einer UID. Der Collector fragt das
-// nur, wenn sein In-Memory-Cache die UID nicht kennt.
+// Current liefert den zuletzt gespeicherten Stand zu einer UID, auch wenn sie
+// als geloescht markiert ist.
+//
+// Geloeschte bewusst eingeschlossen: taucht eine UID wieder auf - etwa nach
+// einem faelschlich erzeugten Loeschvermerk oder einem Watch-Aussetzer - waere
+// sie sonst unbekannt und der Collector schriebe ein zweites created ohne Diff,
+// im Widerspruch zu first_seen, das der Upsert nie zuruecksetzt.
 func (s *Store) Current(ctx context.Context, uid string) (Snapshot, bool, error) {
 	var (
 		hash string
 		raw  []byte
 	)
 	err := s.pool.QueryRow(ctx,
-		`SELECT hash, object FROM resources WHERE uid = $1::uuid AND deleted_at IS NULL`,
+		`SELECT hash, object FROM resources WHERE uid = $1::uuid`,
 		uid).Scan(&hash, &raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Snapshot{}, false, nil
@@ -54,27 +59,69 @@ type LiveResource struct {
 	Images     []string
 }
 
-// LiveUIDs liefert nur die Schluessel dessen, was der Store fuer lebendig
-// haelt. Der Resync vergleicht damit gegen den Cache; die vollen Objekte holt
-// er anschliessend nur fuer die wenigen, die wirklich verschwunden sind.
-func (s *Store) LiveUIDs(ctx context.Context, cluster string) ([]string, error) {
+// LiveRef benennt ein lebendiges Objekt gerade so weit, dass der Resync
+// entscheiden kann, ob es ueberhaupt in den aktuellen Beobachtungsbereich faellt.
+type LiveRef struct {
+	UID       string
+	Namespace string
+}
+
+// LiveRefs liefert die Schluessel dessen, was der Store fuer lebendig haelt.
+// Der Resync vergleicht damit gegen den Cache; die vollen Objekte holt er
+// anschliessend nur fuer die wenigen, die wirklich verschwunden sind.
+//
+// Der Namespace muss mit: ohne ihn liesse sich ein Objekt, das nur nicht mehr
+// beobachtet wird, nicht von einem wirklich geloeschten unterscheiden.
+func (s *Store) LiveRefs(ctx context.Context, cluster string) ([]LiveRef, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT uid::text FROM resources WHERE cluster = $1 AND deleted_at IS NULL`, cluster)
+		`SELECT uid::text, namespace FROM resources WHERE cluster = $1 AND deleted_at IS NULL`, cluster)
 	if err != nil {
-		return nil, fmt.Errorf("list live uids: %w", err)
+		return nil, fmt.Errorf("list live refs: %w", err)
 	}
 	defer rows.Close()
 
-	var out []string
+	var out []LiveRef
 	for rows.Next() {
-		var uid string
-		if err := rows.Scan(&uid); err != nil {
-			return nil, fmt.Errorf("scan live uid: %w", err)
+		var ref LiveRef
+		if err := rows.Scan(&ref.UID, &ref.Namespace); err != nil {
+			return nil, fmt.Errorf("scan live ref: %w", err)
 		}
-		out = append(out, uid)
+		out = append(out, ref)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate live uids: %w", err)
+		return nil, fmt.Errorf("iterate live refs: %w", err)
+	}
+	return out, nil
+}
+
+// Hashes laedt die bekannten Hashes in einem Zug.
+//
+// Ohne das ist der In-Memory-Cache nach jedem Start leer, und der initiale
+// List des Informers loest fuer jedes Objekt im Cluster eine einzelne Abfrage
+// aus - genau bevor Readiness gruen werden soll.
+//
+// Geloeschte bleiben draussen, genau wie zur Laufzeit: der Handler vergisst
+// eine UID beim Loeschen. Waeren sie dabei, wuerde eine mit unveraendertem
+// Hash wiederkehrende UID am Cache abprallen und ihr Loeschvermerk bliebe
+// fuer immer stehen.
+func (s *Store) Hashes(ctx context.Context, cluster string) (map[string]string, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT uid::text, hash FROM resources WHERE cluster = $1 AND deleted_at IS NULL`, cluster)
+	if err != nil {
+		return nil, fmt.Errorf("load hashes: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]string{}
+	for rows.Next() {
+		var uid, hash string
+		if err := rows.Scan(&uid, &hash); err != nil {
+			return nil, fmt.Errorf("scan hash: %w", err)
+		}
+		out[uid] = hash
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate hashes: %w", err)
 	}
 	return out, nil
 }
@@ -190,6 +237,22 @@ func (s *Store) WriteChanges(ctx context.Context, changes []Change) error {
 	return nil
 }
 
+// CountChangesBetween zaehlt die Aenderungen eines Objekts im Zeitfenster.
+// diff_resource braucht das, um sichtbar zu machen, dass ein weites Fenster
+// mehrere Rollouts zu einem Patch verschmilzt.
+func (s *Store) CountChangesBetween(ctx context.Context, cluster, kind, namespace, name string, from, to time.Time) (int, error) {
+	var count int
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*) FROM changes
+		WHERE cluster = $1 AND kind = $2 AND namespace = $3 AND name = $4
+		  AND observed_at > $5 AND observed_at <= $6`,
+		cluster, kind, namespace, name, from.UTC(), to.UTC()).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("count changes between: %w", err)
+	}
+	return count, nil
+}
+
 // ObjectAt liefert den Zustand zu einem Zeitpunkt: die letzte Version mit
 // observed_at <= at. War diese Version eine Loeschung, existierte das Objekt
 // zu diesem Zeitpunkt nicht mehr.
@@ -245,12 +308,13 @@ type ChangeSummary struct {
 	Name         string
 	ChangedPaths []string
 	Images       []string
+	Owner        string
 }
 
 // ListChanges liefert Aenderungen im Zeitfenster, neueste zuerst.
 func (s *Store) ListChanges(ctx context.Context, f ChangeFilter) ([]ChangeSummary, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT observed_at, change_type, offline, kind, namespace, name, changed_paths, images
+		SELECT observed_at, change_type, offline, kind, namespace, name, changed_paths, images, owner
 		FROM changes
 		WHERE cluster = $1
 		  AND observed_at >= $2
@@ -271,10 +335,14 @@ func (s *Store) ListChanges(ctx context.Context, f ChangeFilter) ([]ChangeSummar
 		var (
 			item       ChangeSummary
 			changeType string
+			owner      *string
 		)
 		if err := rows.Scan(&item.ObservedAt, &changeType, &item.Offline, &item.Kind,
-			&item.Namespace, &item.Name, &item.ChangedPaths, &item.Images); err != nil {
+			&item.Namespace, &item.Name, &item.ChangedPaths, &item.Images, &owner); err != nil {
 			return nil, fmt.Errorf("scan change: %w", err)
+		}
+		if owner != nil {
+			item.Owner = *owner
 		}
 		item.Type = ChangeType(changeType)
 		item.ObservedAt = item.ObservedAt.UTC()
@@ -297,17 +365,18 @@ type ResourceSummary struct {
 }
 
 // ListResources liefert beobachtete Objekte, optional inklusive geloeschter.
-func (s *Store) ListResources(ctx context.Context, cluster, kind, namespace string, includeDeleted bool, limit int) ([]ResourceSummary, error) {
+func (s *Store) ListResources(ctx context.Context, cluster, kind, namespace, nameContains string, includeDeleted bool, limit int) ([]ResourceSummary, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT kind, namespace, name, images, last_changed, deleted_at
 		FROM resources
 		WHERE cluster = $1
 		  AND ($2 = '' OR kind = $2)
 		  AND ($3 = '' OR namespace = $3)
-		  AND ($4 OR deleted_at IS NULL)
+		  AND ($4 = '' OR name ILIKE '%' || $4 || '%')
+		  AND ($5 OR deleted_at IS NULL)
 		ORDER BY namespace, kind, name
-		LIMIT $5`,
-		cluster, kind, namespace, includeDeleted, limit)
+		LIMIT $6`,
+		cluster, kind, namespace, nameContains, includeDeleted, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list resources: %w", err)
 	}

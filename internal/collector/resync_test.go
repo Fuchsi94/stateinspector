@@ -17,15 +17,15 @@ type fakeLister struct {
 	fetchedFor []string
 }
 
-func (f *fakeLister) LiveUIDs(context.Context, string) ([]string, error) {
+func (f *fakeLister) LiveRefs(context.Context, string) ([]store.LiveRef, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
-	uids := make([]string, 0, len(f.live))
+	refs := make([]store.LiveRef, 0, len(f.live))
 	for _, r := range f.live {
-		uids = append(uids, r.UID)
+		refs = append(refs, store.LiveRef{UID: r.UID, Namespace: r.Namespace})
 	}
-	return uids, nil
+	return refs, nil
 }
 
 func (f *fakeLister) ResourcesByUID(_ context.Context, _ string, uids []string) ([]store.LiveResource, error) {
@@ -56,6 +56,7 @@ func newSweeper(lister collector.Lister, out chan store.Change) *collector.Sweep
 		Cluster: "local",
 		Lister:  lister,
 		Out:     out,
+		Watches: func(string) bool { return true },
 		Now:     func() time.Time { return time.Unix(1700000000, 0).UTC() },
 	})
 }
@@ -124,5 +125,38 @@ func TestSweepIsIdempotentAcrossRestarts(t *testing.T) {
 	}
 	if got := drain(t, out); len(got) != 0 {
 		t.Errorf("%d Aenderungen, want 0", len(got))
+	}
+}
+
+// P1-Regression: wird --namespaces zwischen zwei Starts verengt, fehlen die
+// Objekte des nicht mehr beobachteten Namespace im Cache. Ohne Scope-Pruefung
+// erklaert der Sweep sie alle fuer geloescht.
+func TestSweepIgnoresResourcesOutsideTheWatchedScope(t *testing.T) {
+	out := make(chan store.Change, 8)
+	inScope := liveResource("11111111-1111-1111-1111-111111111111", "web")
+	outOfScope := liveResource("22222222-2222-2222-2222-222222222222", "legacy")
+	outOfScope.Namespace = "nicht-mehr-beobachtet"
+
+	lister := &fakeLister{live: []store.LiveResource{inScope, outOfScope}}
+	sweeper := collector.NewSweeper(collector.SweeperOptions{
+		Cluster: "local",
+		Lister:  lister,
+		Out:     out,
+		Watches: func(ns string) bool { return ns == "demo" },
+		Now:     func() time.Time { return time.Unix(1700000000, 0).UTC() },
+	})
+
+	// Der Cache kennt beide nicht - das eine ist geloescht, das andere nur
+	// ausserhalb des Beobachtungsbereichs.
+	if err := sweeper.Sweep(t.Context(), map[string]struct{}{}); err != nil {
+		t.Fatalf("Sweep(): %v", err)
+	}
+
+	got := drain(t, out)
+	if len(got) != 1 {
+		t.Fatalf("%d Loeschungen, want genau die im beobachteten Namespace: %+v", len(got), got)
+	}
+	if got[0].Namespace != "demo" {
+		t.Errorf("geloescht wurde %s/%s, want das Objekt aus demo", got[0].Namespace, got[0].Name)
 	}
 }

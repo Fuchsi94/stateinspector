@@ -2,10 +2,17 @@ package mcp
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// maxDays ist die groesste Tageszahl, die noch in eine time.Duration passt.
+// Ohne die Pruefung ist die Umrechnung ein ueberlaufender float64->int64-Cast
+// mit undefiniertem Ergebnis; ein Fenster in die Vergangenheit koennte dadurch
+// in der Zukunft landen. Der h/m/s-Pfad von time.ParseDuration prueft selbst.
+const maxDays = float64(math.MaxInt64) / float64(24*time.Hour)
 
 // ParseTime nimmt entweder einen RFC-3339-Zeitpunkt oder eine relative Dauer
 // wie "24h" oder "7d" und liefert immer UTC (R18).
@@ -39,7 +46,7 @@ func parseDuration(value string) (time.Duration, error) {
 	}
 	if days, found := strings.CutSuffix(value, "d"); found {
 		count, err := strconv.ParseFloat(days, 64)
-		if err != nil || count < 0 {
+		if err != nil || count < 0 || math.IsNaN(count) || count > maxDays {
 			return 0, invalid
 		}
 		return time.Duration(count * float64(24*time.Hour)), nil

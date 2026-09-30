@@ -19,6 +19,9 @@ import (
 type Backend interface {
 	Sink
 	Lister
+	// Hashes laedt den bekannten Stand in einem Zug, damit der initiale List
+	// nicht pro Objekt eine Abfrage ausloest.
+	Hashes(ctx context.Context, cluster string) (map[string]string, error)
 }
 
 // RunnerOptions konfiguriert den Collector-Lauf.
@@ -63,6 +66,14 @@ func (r *Runner) NeedLeaderElection() bool { return true }
 func (r *Runner) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx).WithName("collector")
 
+	// Vor der Registrierung laden, sonst laeuft der initiale List gegen einen
+	// leeren Cache und fragt fuer jedes Objekt einzeln die Datenbank.
+	known, err := r.opts.Backend.Hashes(ctx, r.opts.Cluster)
+	if err != nil {
+		return fmt.Errorf("preload hashes: %w", err)
+	}
+	logger.Info("bekannte Staende vorgeladen", "count", len(known))
+
 	changes := make(chan store.Change, r.opts.BufferSize)
 	handler := NewHandler(HandlerOptions{
 		Context: ctx,
@@ -70,17 +81,18 @@ func (r *Runner) Start(ctx context.Context) error {
 		Watches: r.opts.Watches,
 		Sink:    r.opts.Backend,
 		Out:     changes,
+		Known:   known,
 	})
 
-	for _, gvk := range Watched {
-		informer, err := r.opts.Cache.GetInformer(ctx, newUnstructured(gvk))
+	for _, watched := range Watched {
+		informer, err := r.opts.Cache.GetInformer(ctx, newUnstructured(watched.GVK))
 		if err != nil {
-			return fmt.Errorf("get informer for %s: %w", gvk, err)
+			return fmt.Errorf("get informer for %s: %w", watched.GVK, err)
 		}
 		if _, err := informer.AddEventHandler(handler); err != nil {
-			return fmt.Errorf("add event handler for %s: %w", gvk, err)
+			return fmt.Errorf("add event handler for %s: %w", watched.GVK, err)
 		}
-		logger.Info("beobachte Ressourcenart", "gvk", gvk.String())
+		logger.Info("beobachte Ressourcenart", "gvk", watched.GVK.String())
 	}
 
 	// Erst wenn jeder Informer gesynct ist, sagt das Fehlen eines Objekts im
@@ -97,6 +109,7 @@ func (r *Runner) Start(ctx context.Context) error {
 		Cluster: r.opts.Cluster,
 		Lister:  r.opts.Backend,
 		Out:     changes,
+		Watches: r.opts.Watches,
 	})
 	if err := sweeper.Sweep(ctx, present); err != nil {
 		return fmt.Errorf("resync: %w", err)
@@ -109,6 +122,7 @@ func (r *Runner) Start(ctx context.Context) error {
 	writer := NewWriter(r.opts.Backend, changes, WriterOptions{
 		BatchSize:     r.opts.BatchSize,
 		FlushInterval: r.opts.FlushEvery,
+		OnFailure:     handler,
 	})
 	return writer.Run(ctx)
 }
@@ -122,7 +136,8 @@ func (r *Runner) Start(ctx context.Context) error {
 // Ersparnis, die einmal pro Start anfaellt.
 func (r *Runner) presentUIDs(ctx context.Context) (map[string]struct{}, error) {
 	present := map[string]struct{}{}
-	for _, gvk := range Watched {
+	for _, watched := range Watched {
+		gvk := watched.GVK
 		list := &unstructured.UnstructuredList{}
 		// Die Listen-GVK traegt das List-Suffix, sonst findet der Cache den
 		// Informer nicht.

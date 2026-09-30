@@ -34,6 +34,8 @@ type HandlerOptions struct {
 	Watches func(namespace string) bool
 	Sink    Sink
 	Out     chan<- store.Change
+	// Known sind die beim Start vorgeladenen Hashes je UID.
+	Known map[string]string
 	// Now ist injizierbar, damit Tests feste Zeitpunkte setzen koennen.
 	Now func() time.Time
 }
@@ -53,7 +55,11 @@ func NewHandler(opts HandlerOptions) *Handler {
 	if opts.Now == nil {
 		opts.Now = func() time.Time { return time.Now().UTC() }
 	}
-	return &Handler{opts: opts, hashes: map[string]string{}}
+	hashes := make(map[string]string, len(opts.Known))
+	for uid, hash := range opts.Known {
+		hashes[uid] = hash
+	}
+	return &Handler{opts: opts, hashes: hashes}
 }
 
 // OnAdd behandelt sowohl echte Neuanlagen als auch den initialen List nach
@@ -205,6 +211,17 @@ func (h *Handler) forget(uid string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	delete(h.hashes, uid)
+}
+
+// Forget macht den gemerkten Hash ungueltig. Der Writer ruft das fuer jeden
+// Stapel auf, den er nicht speichern konnte, damit die naechste Beobachtung
+// wieder gegen den Store geprueft wird statt gegen eine Luege.
+func (h *Handler) Forget(uids ...string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, uid := range uids {
+		delete(h.hashes, uid)
+	}
 }
 
 func normalizeAndHash(u *unstructured.Unstructured) (map[string]any, string, error) {

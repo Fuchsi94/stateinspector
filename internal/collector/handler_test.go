@@ -28,7 +28,12 @@ func newFakeSink() *fakeSink {
 	return &fakeSink{current: map[string]store.Snapshot{}}
 }
 
-func (f *fakeSink) WriteChanges(_ context.Context, changes []store.Change) error {
+func (f *fakeSink) WriteChanges(ctx context.Context, changes []store.Change) error {
+	// pgx gibt bei abgelaufenem Context sofort auf; ohne diese Zeile wuerde
+	// der Test den Shutdown-Flush-Fehler gar nicht bemerken koennen.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failNext > 0 {
@@ -65,6 +70,24 @@ func (f *fakeSink) batchCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.batches)
+}
+
+// recordingForgetter haelt fest, welche UIDs der Writer vergessen liess.
+type recordingForgetter struct {
+	mu        sync.Mutex
+	forgotten []string
+}
+
+func (r *recordingForgetter) Forget(uids ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.forgotten = append(r.forgotten, uids...)
+}
+
+func (r *recordingForgetter) list() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.forgotten...)
 }
 
 func deploymentObj(uid, image, resourceVersion string) *unstructured.Unstructured {
@@ -236,7 +259,7 @@ func TestWriterBatchesEverything(t *testing.T) {
 	in := make(chan store.Change, n)
 	for i := 0; i < n; i++ {
 		in <- store.Change{
-			UID: fmt.Sprintf("77777777-7777-7777-7777-%012d", i),
+			UID:  fmt.Sprintf("77777777-7777-7777-7777-%012d", i),
 			Type: store.Created, Cluster: "local", Hash: "h",
 			ObservedAt: time.Now(), Object: map[string]any{"i": i},
 		}
@@ -277,5 +300,83 @@ func TestWriterSurvivesStoreError(t *testing.T) {
 	// Der erste Batch scheiterte, der zweite muss durchgekommen sein.
 	if got := len(sink.written()); got != 1 {
 		t.Errorf("%d Aenderungen geschrieben, want 1 nach einem simulierten Fehler", got)
+	}
+}
+
+// P0-Regression: bei Leader-Uebergabe oder Shutdown ist der laufende Context
+// bereits abgelaufen. Flusht der Writer damit, scheitert pool.Begin sofort und
+// der letzte Stapel ist jedes Mal verloren.
+func TestWriterFlushesPendingBatchAfterContextCancel(t *testing.T) {
+	sink := newFakeSink()
+	in := make(chan store.Change, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	w := collector.NewWriter(sink, in, collector.WriterOptions{
+		BatchSize: 100, FlushInterval: time.Hour, // weder Groesse noch Ticker loesen aus
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	in <- store.Change{UID: "99999999-9999-9999-9999-999999999991", Type: store.Created, Hash: "a", ObservedAt: time.Now()}
+	time.Sleep(200 * time.Millisecond) // im Puffer, noch nicht geschrieben
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run(): %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run() kehrte nach dem Abbruch nicht zurueck")
+	}
+
+	if got := len(sink.written()); got != 1 {
+		t.Errorf("%d Aenderungen nach dem Shutdown gespeichert, want 1", got)
+	}
+}
+
+// Nach einem Schreibfehler muss der Hash-Cache die Version wieder vergessen.
+func TestWriterForgetsHashesOfFailedBatch(t *testing.T) {
+	sink := newFakeSink()
+	sink.failNext = 1
+	forgetter := &recordingForgetter{}
+
+	in := make(chan store.Change, 4)
+	in <- store.Change{UID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1", Type: store.Created, Hash: "a", ObservedAt: time.Now()}
+	in <- store.Change{UID: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa2", Type: store.Created, Hash: "b", ObservedAt: time.Now()}
+	close(in)
+
+	w := collector.NewWriter(sink, in, collector.WriterOptions{
+		BatchSize: 1, FlushInterval: 50 * time.Millisecond, OnFailure: forgetter,
+	})
+	if err := w.Run(t.Context()); err != nil {
+		t.Fatalf("Run(): %v", err)
+	}
+
+	got := forgetter.list()
+	if len(got) != 1 || got[0] != "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1" {
+		t.Errorf("vergessen wurde %v, want genau die UID des gescheiterten Stapels", got)
+	}
+}
+
+// Der Kern des Datenverlusts: schlaegt der Write fehl und der Zustand kehrt
+// spaeter zum zuletzt gespeicherten zurueck, verschwinden ohne Forget zwei
+// echte Aenderungen spurlos.
+func TestForgottenHashIsReEvaluatedAgainstTheStore(t *testing.T) {
+	out := make(chan store.Change, 16)
+	sink := newFakeSink()
+	h := newHandler(t, sink, out)
+	uid := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+	h.OnAdd(deploymentObj(uid, "nginx:1.27", "1"), false)
+	drain(t, out)
+
+	// Der Writer hat diesen Stand nicht wegbekommen.
+	h.Forget(uid)
+
+	h.OnAdd(deploymentObj(uid, "nginx:1.27", "2"), false)
+	if got := drain(t, out); len(got) != 1 {
+		t.Errorf("%d Aenderungen nach dem Vergessen, want 1 erneute Meldung", len(got))
 	}
 }

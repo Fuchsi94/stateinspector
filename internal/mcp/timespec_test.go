@@ -35,7 +35,11 @@ func TestParseTimeAcceptsRFC3339AndRelativeDurations(t *testing.T) {
 }
 
 func TestParseTimeRejectsGarbage(t *testing.T) {
-	for _, in := range []string{"gestern", "7x", "", "letzten Montag", "d", "-3d"} {
+	for _, in := range []string{"gestern", "7x", "", "letzten Montag", "d", "-3d",
+		// Ueberlauf: time.Duration fasst rund 106751 Tage. Ohne Pruefung ist die
+		// Umrechnung ein undefinierter float64->int64-Cast, der ein Fenster in
+		// die Vergangenheit in der Zukunft landen lassen kann.
+		"200000d", "1e30d", "NaNd"} {
 		t.Run(in, func(t *testing.T) {
 			if _, err := mcp.ParseTime(in, reference); err == nil {
 				t.Errorf("ParseTime(%q) lieferte keinen Fehler", in)

@@ -219,7 +219,7 @@ func TestObjectAtAfterDeletionReturnsNothing(t *testing.T) {
 	}
 }
 
-func TestCurrentAndLiveUIDsTrackDeletion(t *testing.T) {
+func TestCurrentAndLiveRefsTrackDeletion(t *testing.T) {
 	ctx := t.Context()
 	s := freshStore(t)
 
@@ -236,16 +236,19 @@ func TestCurrentAndLiveUIDsTrackDeletion(t *testing.T) {
 	if snap.Hash != "nginx:1.27" {
 		t.Errorf("Current().Hash = %q, want nginx:1.27", snap.Hash)
 	}
-	live, err := s.LiveUIDs(ctx, "local")
+	live, err := s.LiveRefs(ctx, "local")
 	if err != nil {
-		t.Fatalf("LiveUIDs(): %v", err)
+		t.Fatalf("LiveRefs(): %v", err)
 	}
-	if len(live) != 1 || live[0] != uid {
-		t.Fatalf("LiveUIDs() = %v, want genau das lebende Objekt", live)
+	if len(live) != 1 || live[0].UID != uid {
+		t.Fatalf("LiveRefs() = %+v, want genau das lebende Objekt", live)
+	}
+	if live[0].Namespace != "demo" {
+		t.Errorf("LiveRefs()[0].Namespace = %q, want demo", live[0].Namespace)
 	}
 
 	// Der Resync laedt die vollen Objekte nur fuer die verschwundenen UIDs.
-	full, err := s.ResourcesByUID(ctx, "local", live)
+	full, err := s.ResourcesByUID(ctx, "local", []string{live[0].UID})
 	if err != nil {
 		t.Fatalf("ResourcesByUID(): %v", err)
 	}
@@ -261,14 +264,28 @@ func TestCurrentAndLiveUIDsTrackDeletion(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("WriteChanges() Loeschung: %v", err)
 	}
-	if _, found, _ := s.Current(ctx, uid); found {
-		t.Error("Current() liefert ein geloeschtes Objekt")
+	// Current sieht geloeschte bewusst weiter: taucht die UID wieder auf, muss
+	// daraus ein updated mit Diff werden statt eines zweiten created, das
+	// first_seen widerspraeche.
+	if _, found, _ := s.Current(ctx, uid); !found {
+		t.Error("Current() findet ein geloeschtes Objekt nicht; eine Wiederkehr waere ein zweites created")
 	}
-	live, err = s.LiveUIDs(ctx, "local")
+
+	live, err = s.LiveRefs(ctx, "local")
 	if err != nil {
-		t.Fatalf("LiveUIDs(): %v", err)
+		t.Fatalf("LiveRefs(): %v", err)
 	}
 	if len(live) != 0 {
-		t.Errorf("LiveUIDs() enthaelt ein geloeschtes Objekt: %v", live)
+		t.Errorf("LiveRefs() enthaelt ein geloeschtes Objekt: %+v", live)
+	}
+
+	// Vorgeladen wird sie dagegen nicht mehr, sonst prallte ihre Wiederkehr
+	// mit unveraendertem Hash am Cache ab und der Loeschvermerk bliebe stehen.
+	hashes, err := s.Hashes(ctx, "local")
+	if err != nil {
+		t.Fatalf("Hashes(): %v", err)
+	}
+	if _, present := hashes[uid]; present {
+		t.Error("Hashes() laedt eine geloeschte UID vor")
 	}
 }

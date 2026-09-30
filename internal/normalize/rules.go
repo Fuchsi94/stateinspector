@@ -44,6 +44,23 @@ var kindRules = map[schema.GroupKind][]Rule{
 	},
 }
 
+// alreadySummarized erkennt die Form, die summarizeData selbst erzeugt.
+//
+// Der Test haengt an "keys" als Liste: die data-Map einer echten ConfigMap
+// kommt aus map[string]string, ihre Werte sind also immer Strings. Eine Liste
+// an dieser Stelle kann folglich nur von uns stammen - eine ConfigMap mit den
+// Schluesseln "keys" und "sha256" wird dadurch nicht faelschlich uebersprungen.
+func alreadySummarized(data map[string]any) bool {
+	if len(data) != 2 {
+		return false
+	}
+	if _, isList := data["keys"].([]any); !isList {
+		return false
+	}
+	sum, isString := data["sha256"].(string)
+	return isString && len(sum) == 64
+}
+
 // removeField loescht ein verschachteltes Feld, falls es existiert.
 func removeField(path ...string) Rule {
 	return func(obj map[string]any) error {
@@ -85,6 +102,13 @@ func summarizeData(field string) Rule {
 	return func(obj map[string]any) error {
 		data, ok := obj[field].(map[string]any)
 		if !ok || len(data) == 0 {
+			return nil
+		}
+		// Der Cache-Transform hat dieses Feld unter Umstaenden schon
+		// zusammengefasst. Ein zweiter Durchlauf wuerde daraus
+		// keys: ["keys","sha256"] machen und die echten Schluesselnamen
+		// verlieren - genau das Feld, wegen dem es die Regel gibt.
+		if alreadySummarized(data) {
 			return nil
 		}
 		keys := make([]string, 0, len(data))

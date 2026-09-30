@@ -33,10 +33,21 @@ func init() {
 	metrics.Registry.MustRegister(changesWritten, writeFailures, bufferFull)
 }
 
+// Forgetter erfaehrt, welche Objekte nicht gespeichert werden konnten.
+type Forgetter interface {
+	Forget(uids ...string)
+}
+
 // WriterOptions konfiguriert die Stapelbildung.
 type WriterOptions struct {
 	BatchSize     int
 	FlushInterval time.Duration
+	// OnFailure bekommt die UIDs eines gescheiterten Stapels. Ohne das wuerde
+	// der Hash-Cache des Handlers glauben, diese Versionen seien gespeichert,
+	// und die naechste identische Beobachtung wegdedupliziert.
+	OnFailure Forgetter
+	// ShutdownFlushTimeout begrenzt den Abschluss-Flush.
+	ShutdownFlushTimeout time.Duration
 }
 
 // Writer sammelt Aenderungen und schreibt sie gebuendelt, damit der
@@ -55,6 +66,9 @@ func NewWriter(sink Sink, in <-chan store.Change, opts WriterOptions) *Writer {
 	if opts.FlushInterval <= 0 {
 		opts.FlushInterval = time.Second
 	}
+	if opts.ShutdownFlushTimeout <= 0 {
+		opts.ShutdownFlushTimeout = 10 * time.Second
+	}
 	return &Writer{sink: sink, in: in, opts: opts}
 }
 
@@ -70,13 +84,26 @@ func (w *Writer) Run(ctx context.Context) error {
 	defer ticker.Stop()
 
 	batch := make([]store.Change, 0, w.opts.BatchSize)
-	flush := func() {
+
+	// flushCtx ist ein Parameter, weil der Abschluss-Flush einen anderen
+	// Context braucht als der laufende Betrieb.
+	flush := func(flushCtx context.Context) {
 		if len(batch) == 0 {
 			return
 		}
-		if err := w.sink.WriteChanges(ctx, batch); err != nil {
+		if err := w.sink.WriteChanges(flushCtx, batch); err != nil {
 			writeFailures.Inc()
 			logger.Error(err, "Aenderungen nicht gespeichert", "count", len(batch))
+			// Der Handler muss die Hashes wieder vergessen, sonst gilt eine nie
+			// geschriebene Version als gespeichert und die naechste Beobachtung
+			// desselben Zustands erzeugt keinen Eintrag mehr.
+			if w.opts.OnFailure != nil {
+				uids := make([]string, 0, len(batch))
+				for _, c := range batch {
+					uids = append(uids, c.UID)
+				}
+				w.opts.OnFailure.Forget(uids...)
+			}
 		} else {
 			changesWritten.Add(float64(len(batch)))
 		}
@@ -86,19 +113,25 @@ func (w *Writer) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			flush()
+			// Der laufende Context ist hier bereits abgelaufen; mit ihm wuerde
+			// pool.Begin sofort scheitern und der letzte Stapel waere immer
+			// verloren - bei Leader-Uebergabe also jedes Mal.
+			flushCtx, cancel := context.WithTimeout(
+				context.WithoutCancel(ctx), w.opts.ShutdownFlushTimeout)
+			flush(flushCtx)
+			cancel()
 			return nil
 		case change, open := <-w.in:
 			if !open {
-				flush()
+				flush(ctx)
 				return nil
 			}
 			batch = append(batch, change)
 			if len(batch) >= w.opts.BatchSize {
-				flush()
+				flush(ctx)
 			}
 		case <-ticker.C:
-			flush()
+			flush(ctx)
 		}
 	}
 }

@@ -44,28 +44,32 @@ func TestLeadingQuestions(t *testing.T) {
 		question string
 		tool     string
 		args     map[string]any
-		// wantFound verlangt eine inhaltliche Antwort, nicht nur ein Ergebnis.
+		// wantFound verlangt ein gefundenes Objekt.
 		wantFound bool
+		// wantNonEmpty nennt das Listenfeld, das Eintraege enthalten muss.
+		// Ohne das wuerde auch eine leere Antwort als bestanden durchgehen -
+		// genau der blinde Fleck, den dieser Test vermeiden soll.
+		wantNonEmpty string
 	}{
 		{
 			"Was hat sich seit gestern in Namespace demo geaendert?",
 			"list_changes", map[string]any{"since": "24h", "namespace": "demo", "limit": 5},
-			false,
+			false, "changes",
 		},
 		{
 			"Welche Image-Version laeuft von web?",
 			"get_versions", map[string]any{"namespace": "demo", "name_contains": "web"},
-			false,
+			false, "workloads",
 		},
 		{
 			"Wie sah Deployment web zu Beginn der Historie aus?",
 			"get_resource", map[string]any{"kind": "Deployment", "namespace": "demo", "name": "web", "at": since},
-			true,
+			true, "",
 		},
 		{
 			"Was genau wurde seither an web geaendert?",
 			"diff_resource", map[string]any{"kind": "Deployment", "namespace": "demo", "name": "web", "from": since},
-			true,
+			true, "",
 		},
 	}
 
@@ -96,6 +100,20 @@ func TestLeadingQuestions(t *testing.T) {
 				}
 				if !body.Found {
 					t.Errorf("%s fand nichts, obwohl die Historie den Zeitpunkt abdeckt:\n%s", q.tool, pretty)
+				}
+			}
+			if q.wantNonEmpty != "" {
+				var body map[string]json.RawMessage
+				if err := json.Unmarshal(pretty, &body); err != nil {
+					t.Fatalf("Ergebnis lesen: %v", err)
+				}
+				var list []any
+				if err := json.Unmarshal(body[q.wantNonEmpty], &list); err != nil {
+					t.Fatalf("Feld %s lesen: %v", q.wantNonEmpty, err)
+				}
+				if len(list) == 0 {
+					t.Errorf("%s lieferte ein leeres %s; die Frage bleibt damit unbeantwortet:\n%s",
+						q.tool, q.wantNonEmpty, pretty)
 				}
 			}
 			t.Logf("\nFrage: %s\nTool:  %s\nAntwort:\n%s", q.question, q.tool, pretty)

@@ -14,7 +14,7 @@ import (
 // Schritte: der Abgleich braucht nur Schluessel, die vollen Objekte erst fuer
 // die wenigen, die wirklich fehlen.
 type Lister interface {
-	LiveUIDs(ctx context.Context, cluster string) ([]string, error)
+	LiveRefs(ctx context.Context, cluster string) ([]store.LiveRef, error)
 	ResourcesByUID(ctx context.Context, cluster string, uids []string) ([]store.LiveResource, error)
 }
 
@@ -23,6 +23,8 @@ type SweeperOptions struct {
 	Cluster string
 	Lister  Lister
 	Out     chan<- store.Change
+	// Watches grenzt den Abgleich auf den aktuell beobachteten Bereich ein.
+	Watches func(namespace string) bool
 	Now     func() time.Time
 }
 
@@ -46,15 +48,22 @@ func NewSweeper(opts SweeperOptions) *Sweeper {
 func (s *Sweeper) Sweep(ctx context.Context, present map[string]struct{}) error {
 	logger := log.FromContext(ctx).WithName("resync")
 
-	live, err := s.opts.Lister.LiveUIDs(ctx, s.opts.Cluster)
+	live, err := s.opts.Lister.LiveRefs(ctx, s.opts.Cluster)
 	if err != nil {
-		return fmt.Errorf("load live uids: %w", err)
+		return fmt.Errorf("load live refs: %w", err)
 	}
 
 	var missing []string
-	for _, uid := range live {
-		if _, stillThere := present[uid]; !stillThere {
-			missing = append(missing, uid)
+	for _, ref := range live {
+		// Ein Objekt ausserhalb des aktuellen Beobachtungsbereichs fehlt im
+		// Cache, weil es nicht beobachtet wird - nicht, weil es geloescht
+		// wurde. Ohne diese Unterscheidung wuerde ein verengtes --namespaces
+		// beim naechsten Start reihenweise Loeschungen erfinden.
+		if s.opts.Watches != nil && !s.opts.Watches(ref.Namespace) {
+			continue
+		}
+		if _, stillThere := present[ref.UID]; !stillThere {
+			missing = append(missing, ref.UID)
 		}
 	}
 	if len(missing) == 0 {

@@ -41,14 +41,17 @@ func TestWatchedGVKsAreWellFormed(t *testing.T) {
 		t.Fatal("Watched ist leer")
 	}
 	seen := map[string]bool{}
-	for _, gvk := range collector.Watched {
-		if gvk.Version == "" || gvk.Kind == "" {
-			t.Errorf("unvollstaendige GVK: %+v", gvk)
+	for _, watched := range collector.Watched {
+		if watched.GVK.Version == "" || watched.GVK.Kind == "" {
+			t.Errorf("unvollstaendige GVK: %+v", watched.GVK)
 		}
-		if seen[gvk.String()] {
-			t.Errorf("GVK doppelt registriert: %s", gvk)
+		if watched.Resource == "" {
+			t.Errorf("%s ohne Plural; der RBAC-Abgleich kann ihn nicht pruefen", watched.GVK.Kind)
 		}
-		seen[gvk.String()] = true
+		if seen[watched.GVK.String()] {
+			t.Errorf("GVK doppelt registriert: %s", watched.GVK)
+		}
+		seen[watched.GVK.String()] = true
 	}
 }
 
@@ -92,21 +95,10 @@ func TestEveryWatchedKindHasRBAC(t *testing.T) {
 		}
 	}
 
-	for _, gvk := range collector.Watched {
-		resource := pluralize(gvk.Kind)
-		if !granted[gvk.Group][resource] {
+	for _, watched := range collector.Watched {
+		if !granted[watched.GVK.Group][watched.Resource] {
 			t.Errorf("kein RBAC fuer %s (Gruppe %q, Ressource %q) - Marker in registry.go vergessen?",
-				gvk.Kind, gvk.Group, resource)
+				watched.GVK.Kind, watched.GVK.Group, watched.Resource)
 		}
 	}
-}
-
-// pluralize bildet die Kubernetes-Pluralform: Ingress -> ingresses,
-// Deployment -> deployments.
-func pluralize(kind string) string {
-	lower := strings.ToLower(kind)
-	if strings.HasSuffix(lower, "s") {
-		return lower + "es"
-	}
-	return lower + "s"
 }

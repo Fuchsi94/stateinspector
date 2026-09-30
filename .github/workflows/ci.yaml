@@ -18,8 +18,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod }
+      - uses: extractions/setup-just@v2
       - uses: helm/kind-action@v1
         with: { cluster_name: stateinspector }
+
+      # CLAUDE.md verlangt kubectl ausschliesslich ueber "just k". Das Recipe
+      # nutzt die repo-lokale Kubeconfig, also die von kind-action dorthin
+      # spiegeln, statt die Regel zu umgehen.
+      - name: Kubeconfig repo-lokal bereitstellen
+        run: |
+          mkdir -p .kube
+          kubectl config view --raw > .kube/config
 
       - name: Image bauen und in den Cluster laden
         run: |
@@ -28,16 +37,16 @@ jobs:
 
       - name: Postgres, Operator und Demo-Workloads deployen
         run: |
-          kubectl apply -f config/base/namespace.yaml
-          kubectl apply -f dev/postgres.yaml
-          kubectl -n stateinspector rollout status statefulset/postgres --timeout=180s
-          kubectl apply -k config/ci
-          kubectl apply -f dev/sample-workloads.yaml
-          kubectl -n stateinspector rollout status deployment/stateinspector --timeout=180s
+          just k apply -f config/base/namespace.yaml
+          just k apply -f dev/postgres.yaml
+          just k -n stateinspector rollout status statefulset/postgres --timeout=180s
+          just k apply -k config/ci
+          just k apply -f dev/sample-workloads.yaml
+          just k -n stateinspector rollout status deployment/stateinspector --timeout=180s
 
       - name: MCP-Port weiterleiten
         run: |
-          kubectl -n stateinspector port-forward deployment/stateinspector 8081:8081 &
+          just k -n stateinspector port-forward deployment/stateinspector 8081:8081 &
           for i in $(seq 1 30); do
             nc -z localhost 8081 && exit 0
             sleep 1
@@ -50,6 +59,6 @@ jobs:
       - name: Diagnose bei Fehlschlag
         if: failure()
         run: |
-          kubectl -n stateinspector get pods -o wide
-          kubectl -n stateinspector logs deployment/stateinspector --tail=200 || true
-          kubectl -n stateinspector describe deployment/stateinspector || true
+          just k -n stateinspector get pods -o wide
+          just k -n stateinspector logs deployment/stateinspector --tail=200 || true
+          just k -n stateinspector describe deployment/stateinspector || true

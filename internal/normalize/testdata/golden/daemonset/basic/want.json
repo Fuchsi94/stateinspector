@@ -1,0 +1,12 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "DaemonSet",
+  "metadata": { "name": "agent", "namespace": "demo" },
+  "spec": {
+    "selector": { "matchLabels": { "app": "agent" } },
+    "template": {
+      "metadata": { "labels": { "app": "agent" } },
+      "spec": { "containers": [ { "name": "agent", "image": "busybox:1.36" } ] }
+    }
+  }
+}
