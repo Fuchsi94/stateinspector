@@ -1,8 +1,8 @@
 # stateinspector — Progress
 
-Phase: work — U1 bis U14 implementiert und verifiziert (2026-09-29)
-Next: Shipping — `ce-simplify-code`, Code-Review, dann PR. Danach erst ist der
-MVP abgeschlossen; die Post-MVP-Punkte unten bleiben offen.
+Phase: work — U1 bis U14 implementiert, vereinfacht und review-korrigiert (2026-09-30)
+Next: Remote anlegen und pushen; es gibt noch keins, daher kein PR. Danach die
+offenen Punkte unten abarbeiten.
 
 ## Artefakte
 - Plan: `docs/plans/2026-09-29-stateinspector-mvp.md` (14 Units, Verification Contract, Definition of Done)
@@ -58,6 +58,53 @@ inklusive Indizes, rund 3.8 kB pro Eintrag** (JSONB wird von Postgres via TOAST
 komprimiert). `resources`: 18 Zeilen, 96 kB. Hochgerechnet kostet ein Cluster mit
 500 beobachteten Objekten und 20 Aenderungen pro Tag rund 28 MB im Jahr — unkritisch,
 aber unbegrenzt wachsend. Die Zahl ist der Ausgangspunkt fuer die Retention-Frage.
+
+## Code-Review 2026-09-30
+
+Elf Reviewer-Personas, kein Cross-Model-Pass (bewusst untersagt, adversarial lief
+lokal — Unabhaengigkeit damit nicht attestiert). Artefakte lagen unter
+`/tmp/compound-engineering-501/ce-code-review/20260930-102612-0794df5c/`.
+Ergebnis: 1 P0, 10 P1, rund 12 P2/P3. Alles bis auf die unten genannten Punkte behoben.
+
+### Was die gruenen Gates nicht gefangen haben — und warum
+
+Die Tests pruefen jede Stufe isoliert, nicht die Uebergaenge. Beide schwersten
+Fehler lebten genau dort:
+
+- **ConfigMap-Schluessel zerstoert.** Der Cache-Transform fasst `data` zusammen,
+  die Normalisierungsregel fasste das Ergebnis erneut zusammen — gespeichert wurde
+  `keys: ["keys","sha256"]` statt der echten Namen, in jeder Umgebung, immer. Der
+  Golden-Test fuettert ein *rohes* Objekt (eine Anwendung, korrekt), der envtest
+  prueft nur die Abwesenheit von Werten (auch doppelt zusammengefasst erfuellt). Den
+  Produktionspfad lief kein Test.
+- **P0: Shutdown-Flush auf totem Context.** `flush()` nutzte den bereits
+  gecancelten Context, `pool.Begin` scheiterte dadurch immer, jede Leader-Uebergabe
+  verlor bis zu 100 Eintraege. Beide Writer-Tests schlossen den Kanal, statt den
+  Context abzubrechen — der Zweig war nie getestet.
+
+Fuer beide gibt es jetzt Regressionstests, und beide wurden gegengeprueft: mit
+zurueckgedrehtem Fix werden sie rot.
+
+### Bewusst nicht behoben
+
+- **`--exclude-namespaces` verkleinert den Informer-Cache nicht**, es filtert nur im
+  Handler; `kube-system` liegt also vollstaendig im Speicher. Der Weg waere ein
+  `DefaultFieldSelector` mit `metadata.namespace !=`. Vorher muss verifiziert werden,
+  dass der API-Server mehrere UND-verknuepfte Ungleichheiten auf `metadata.namespace`
+  im Watch traegt — nicht geraten, sondern offen gelassen.
+- **Kein Retry im Writer.** Ein gescheiterter Stapel ist weiterhin verloren; neu ist
+  nur, dass der Handler die Hashes vergisst und die naechste Beobachtung den Eintrag
+  wieder erzeugt. Ein echter Retry mit Backoff ist eine eigene Entscheidung.
+- **`offline` wird bei `created` nicht gesetzt.** Ein waehrend des Ausfalls neu
+  angelegtes Objekt kommt als `created` mit `offline=false`. Unterscheidbar waere das
+  nur ueber "hat der Store fuer diesen Cluster ueberhaupt schon Zeilen" — eine
+  Produktentscheidung, keine Fehlerbehebung.
+- **goose nimmt keine Advisory Lock.** Die Default-RollingUpdate-Strategie laesst
+  kurzzeitig zwei Pods zu; gleichzeitige `Migrate()` sind heute nur durch Timing
+  ungefaehrlich.
+- **`since`/`until` versus `from`/`to`** heissen in zwei Tools verschieden. Eine
+  Vereinheitlichung braeche den bestehenden Werkzeugvertrag fuer wenig Gewinn.
+- **Retention** bleibt wie entschieden post-MVP.
 
 ## Offene Punkte (im MVP)
 - ~~CI-E2E deployt nichts~~ — erledigt in U13: der Job deployt Postgres, Operator und
