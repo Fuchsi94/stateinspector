@@ -1,8 +1,11 @@
 # stateinspector — Progress
 
-Phase: work — U1 bis U14 implementiert, vereinfacht und review-korrigiert (2026-09-30)
-Next: Remote anlegen und pushen; es gibt noch keins, daher kein PR. Danach die
-offenen Punkte unten abarbeiten.
+Phase: review — PR #1 offen, CI gruen (2026-09-30)
+Next: PR #1 durchsehen und mergen. Danach die offenen Punkte unten.
+
+Remote: https://github.com/Fuchsi94/stateinspector (public)
+PR: https://github.com/Fuchsi94/stateinspector/pull/1 — `main` ist der
+Baseline-Commit (Geruest + Plan), der PR traegt den gesamten Code.
 
 ## Artefakte
 - Plan: `docs/plans/2026-09-29-stateinspector-mvp.md` (14 Units, Verification Contract, Definition of Done)
@@ -107,9 +110,12 @@ zurueckgedrehtem Fix werden sie rot.
 - **Retention** bleibt wie entschieden post-MVP.
 
 ## Offene Punkte (im MVP)
-- ~~CI-E2E deployt nichts~~ — erledigt in U13: der Job deployt Postgres, Operator und
-  Demo-Workloads, `config/ci` pinnt das gebaute Image. **Noch nicht auf GitHub gelaufen**,
-  da kein Remote konfiguriert ist; lokal ist der aequivalente Pfad gruen.
+- ~~CI-E2E deployt nichts~~ — erledigt in U13, auf GitHub gruen verifiziert (Run 36700494789).
+  Beim ersten echten Lauf fiel noch eine Reihenfolge auf: `config/base` setzt auf dem
+  Namespace `pod-security enforce=restricted`, was den als root laufenden Postgres-Pod
+  abweist. Nur das dev-Overlay, von dem `config/ci` erbt, lockert auf `baseline` — das
+  Overlay muss also vor Postgres angewendet werden. Lokal war das nie sichtbar, weil
+  Tilt immer ueber `config/dev` geht.
 - ~~Versions-Achse~~ — erledigt in U1: Go 1.27, controller-runtime v0.25.1,
   envtest 1.37.0, k8s.io/api v0.37.0.
 - ~~Index-Patch auf `args/1`~~ — erledigt in U14: Strategic-Merge ersetzt die Liste als Ganzes.
@@ -126,6 +132,12 @@ zurueckgedrehtem Fix werden sie rot.
   Image-Digests, UI, Multi-Cluster, Auth am MCP-Server.
 
 ## Learnings
+- Die zwei schwersten Fehler des Reviews lagen beide zwischen zwei gruen getesteten
+  Stufen, nicht in einer. Komponententests allein finden so etwas nicht; es braucht
+  mindestens einen Test, der den Produktionspfad durchlaeuft.
+- Ein CI-Job, der nie gelaufen ist, ist nicht gruen, sondern ungeprueft. Der Umbau sah
+  lokal richtig aus und fiel beim ersten echten Lauf ueber eine Policy, die lokal ein
+  Overlay stillschweigend abfaengt.
 - controller-runtime v0.25 -> client-go v0.37, Mindest-Go 1.26. Die envtest-Version muss der
   CR-Minor folgen, nicht frei gewaehlt werden. Quelle: Kompatibilitaetsmatrix im
   controller-runtime README.
