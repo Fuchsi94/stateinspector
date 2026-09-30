@@ -35,14 +35,28 @@ jobs:
           docker build -t stateinspector:ci .
           kind load docker-image stateinspector:ci --name stateinspector
 
-      - name: Postgres, Operator und Demo-Workloads deployen
+      # Reihenfolge ist hier wesentlich: config/base setzt auf dem Namespace
+      # pod-security enforce=restricted, und Postgres laeuft als root. Wird der
+      # Namespace aus der Base angelegt, weist die Policy den Postgres-Pod ab
+      # und das Warten laeuft in den Timeout. Das ci-Overlay erbt vom
+      # dev-Overlay, das auf baseline lockert - es muss also zuerst kommen.
+      - name: Namespace und Operator anlegen
+        run: just k apply -k config/ci
+
+      - name: Postgres anlegen und abwarten
         run: |
-          just k apply -f config/base/namespace.yaml
           just k apply -f dev/postgres.yaml
           just k -n stateinspector rollout status statefulset/postgres --timeout=180s
-          just k apply -k config/ci
-          just k apply -f dev/sample-workloads.yaml
-          just k -n stateinspector rollout status deployment/stateinspector --timeout=180s
+
+      - name: Operator starten, sobald die Datenbank steht
+        run: |
+          # Der Operator wurde vor dem DATABASE_URL-Secret erzeugt und haengt
+          # daher im Backoff; ein Neustart spart das Abwarten.
+          just k -n stateinspector rollout restart deployment/stateinspector
+          just k -n stateinspector rollout status deployment/stateinspector --timeout=240s
+
+      - name: Demo-Workloads anlegen
+        run: just k apply -f dev/sample-workloads.yaml
 
       - name: MCP-Port weiterleiten
         run: |
