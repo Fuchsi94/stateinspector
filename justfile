@@ -2,7 +2,7 @@
 export KUBECONFIG := justfile_directory() / ".kube" / "config"
 
 cluster := "kind-stateinspector"
-envtest_k8s := "1.34.x"
+envtest_k8s := "1.37.x"
 
 default:
     @just --list

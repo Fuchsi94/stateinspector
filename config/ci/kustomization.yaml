@@ -1,0 +1,10 @@
+# Overlay fuer CI: wie dev, aber mit dem Image-Tag, das der Workflow baut und
+# per "kind load" in den Cluster legt. Ohne das zeigt config/dev auf ein Image
+# ohne Tag, das in CI nicht existiert.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../dev
+images:
+  - name: stateinspector
+    newTag: ci

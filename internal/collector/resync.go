@@ -1,0 +1,98 @@
+package collector
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/Fuchsi94/stateinspector/internal/store"
+)
+
+// Lister ist der Ausschnitt des Stores, den der Sweep braucht. Bewusst zwei
+// Schritte: der Abgleich braucht nur Schluessel, die vollen Objekte erst fuer
+// die wenigen, die wirklich fehlen.
+type Lister interface {
+	LiveRefs(ctx context.Context, cluster string) ([]store.LiveRef, error)
+	ResourcesByUID(ctx context.Context, cluster string, uids []string) ([]store.LiveResource, error)
+}
+
+// SweeperOptions konfiguriert den Abgleich nach dem Cache-Sync.
+type SweeperOptions struct {
+	Cluster string
+	Lister  Lister
+	Out     chan<- store.Change
+	// Watches grenzt den Abgleich auf den aktuell beobachteten Bereich ein.
+	Watches func(namespace string) bool
+	Now     func() time.Time
+}
+
+// Sweeper gleicht den gespeicherten Stand mit dem Cache ab. Ohne ihn bliebe
+// alles, was waehrend eines Ausfalls geloescht wurde, fuer immer als lebendig
+// verzeichnet (R13).
+type Sweeper struct {
+	opts SweeperOptions
+}
+
+// NewSweeper baut den Abgleich.
+func NewSweeper(opts SweeperOptions) *Sweeper {
+	if opts.Now == nil {
+		opts.Now = func() time.Time { return time.Now().UTC() }
+	}
+	return &Sweeper{opts: opts}
+}
+
+// Sweep laeuft genau einmal, nachdem der Cache gesynct ist. present enthaelt
+// die UIDs, die der Cache kennt.
+func (s *Sweeper) Sweep(ctx context.Context, present map[string]struct{}) error {
+	logger := log.FromContext(ctx).WithName("resync")
+
+	live, err := s.opts.Lister.LiveRefs(ctx, s.opts.Cluster)
+	if err != nil {
+		return fmt.Errorf("load live refs: %w", err)
+	}
+
+	var missing []string
+	for _, ref := range live {
+		// Ein Objekt ausserhalb des aktuellen Beobachtungsbereichs fehlt im
+		// Cache, weil es nicht beobachtet wird - nicht, weil es geloescht
+		// wurde. Ohne diese Unterscheidung wuerde ein verengtes --namespaces
+		// beim naechsten Start reihenweise Loeschungen erfinden.
+		if s.opts.Watches != nil && !s.opts.Watches(ref.Namespace) {
+			continue
+		}
+		if _, stillThere := present[ref.UID]; !stillThere {
+			missing = append(missing, ref.UID)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+
+	vanished, err := s.opts.Lister.ResourcesByUID(ctx, s.opts.Cluster, missing)
+	if err != nil {
+		return fmt.Errorf("load vanished resources: %w", err)
+	}
+
+	observedAt := s.opts.Now()
+	for _, resource := range vanished {
+		logger.Info("waehrend des Ausfalls geloescht",
+			"gvk", resource.Kind, "namespace", resource.Namespace,
+			"name", resource.Name, "uid", resource.UID)
+
+		change := store.Change{
+			UID: resource.UID, Cluster: s.opts.Cluster,
+			APIGroup: resource.APIGroup, APIVersion: resource.APIVersion,
+			Kind: resource.Kind, Namespace: resource.Namespace, Name: resource.Name,
+			Type: store.Deleted, Offline: true, ObservedAt: observedAt,
+			Hash: resource.Hash, Object: resource.Object, Images: resource.Images,
+		}
+		select {
+		case s.opts.Out <- change:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}

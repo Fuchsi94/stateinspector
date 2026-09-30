@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: agent
+  namespace: demo
+  uid: 44444444-4444-4444-4444-444444444444
+  resourceVersion: "500"
+  generation: 2
+  creationTimestamp: "2026-09-01T10:00:00Z"
+spec:
+  selector:
+    matchLabels: { app: agent }
+  template:
+    metadata:
+      labels: { app: agent }
+    spec:
+      containers:
+        - name: agent
+          image: busybox:1.36
+status:
+  numberReady: 3

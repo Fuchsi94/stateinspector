@@ -13,6 +13,13 @@ normalisiert sie, speichert jede Aenderung in Postgres und stellt die Historie u
 - `internal/extract` — Images, Owner, Labels aus Objekten ziehen
 - `api/` — CRD-Types (ab Phase 3)
 - `test/e2e` — E2E gegen kind
+- `docs/solutions/` — dokumentierte Loesungen vergangener Probleme (Bugs, Praktiken,
+  Workflow-Muster), nach Kategorie abgelegt mit YAML-Frontmatter (`module`, `tags`,
+  `problem_type`). Relevant beim Implementieren oder Debuggen in bereits
+  dokumentierten Bereichen.
+- `CONCEPTS.md` — gemeinsames Domain-Vokabular (Normalisierung, Rauschen, Change,
+  Resource, Hash-Cache). Relevant beim Einarbeiten und wenn ueber diese Begriffe
+  gesprochen wird.
 
 ## Befehle
 - `just up` / `just down` — lokaler kind-Cluster + Tilt

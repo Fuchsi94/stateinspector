@@ -3,15 +3,29 @@ kind: Kustomization
 resources:
   - ../base
 patches:
-  # Tilt live_update muss das Binary im Container ersetzen koennen.
+  # Strategic-Merge statt Index-Patch: die fruehere Form ersetzte args[1] per
+  # Position. Wer die Flags umsortiert, haette damit still das falsche Argument
+  # ueberschrieben. args ist eine atomare Liste, wird also komplett ersetzt.
   - target: { kind: Deployment, name: stateinspector }
     patch: |-
-      - op: replace
-        path: /spec/template/spec/containers/0/securityContext/readOnlyRootFilesystem
-        value: false
-      - op: replace
-        path: /spec/template/spec/containers/0/args/1
-        value: --leader-elect=false
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: stateinspector
+      spec:
+        template:
+          spec:
+            containers:
+              - name: stateinspector
+                args:
+                  - --cluster-name=local
+                  - --leader-elect=false
+                  - --metrics-bind-address=:8080
+                  - --health-probe-bind-address=:8082
+                  - --mcp-bind-address=127.0.0.1:8081
+                # Tilt live_update muss das Binary im Container ersetzen koennen.
+                securityContext:
+                  readOnlyRootFilesystem: false
   # Postgres-Image laeuft initial als root: im Dev-Namespace nur baseline erzwingen.
   - target: { kind: Namespace, name: stateinspector }
     patch: |-

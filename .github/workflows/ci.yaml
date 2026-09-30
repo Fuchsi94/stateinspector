@@ -21,10 +21,58 @@ jobs:
       - uses: extractions/setup-just@v2
       - uses: helm/kind-action@v1
         with: { cluster_name: stateinspector }
-      - run: |
+
+      # CLAUDE.md verlangt kubectl ausschliesslich ueber "just k". Das Recipe
+      # nutzt die repo-lokale Kubeconfig, also die von kind-action dorthin
+      # spiegeln, statt die Regel zu umgehen.
+      - name: Kubeconfig repo-lokal bereitstellen
+        run: |
+          mkdir -p .kube
+          kubectl config view --raw > .kube/config
+
+      - name: Image bauen und in den Cluster laden
+        run: |
           docker build -t stateinspector:ci .
           kind load docker-image stateinspector:ci --name stateinspector
-          kubectl apply -f dev/sample-workloads.yaml
-          kubectl apply -k config/base --dry-run=client -o yaml >/dev/null
-      - run: go test ./test/e2e/... -tags e2e -v -count=1
-        env: { E2E_IMAGE: "stateinspector:ci" }
+
+      # Reihenfolge ist hier wesentlich: config/base setzt auf dem Namespace
+      # pod-security enforce=restricted, und Postgres laeuft als root. Wird der
+      # Namespace aus der Base angelegt, weist die Policy den Postgres-Pod ab
+      # und das Warten laeuft in den Timeout. Das ci-Overlay erbt vom
+      # dev-Overlay, das auf baseline lockert - es muss also zuerst kommen.
+      - name: Namespace und Operator anlegen
+        run: just k apply -k config/ci
+
+      - name: Postgres anlegen und abwarten
+        run: |
+          just k apply -f dev/postgres.yaml
+          just k -n stateinspector rollout status statefulset/postgres --timeout=180s
+
+      - name: Operator starten, sobald die Datenbank steht
+        run: |
+          # Der Operator wurde vor dem DATABASE_URL-Secret erzeugt und haengt
+          # daher im Backoff; ein Neustart spart das Abwarten.
+          just k -n stateinspector rollout restart deployment/stateinspector
+          just k -n stateinspector rollout status deployment/stateinspector --timeout=240s
+
+      - name: Demo-Workloads anlegen
+        run: just k apply -f dev/sample-workloads.yaml
+
+      - name: MCP-Port weiterleiten
+        run: |
+          just k -n stateinspector port-forward deployment/stateinspector 8081:8081 &
+          for i in $(seq 1 30); do
+            nc -z localhost 8081 && exit 0
+            sleep 1
+          done
+          echo "Port-Forward auf 8081 kam nicht hoch" >&2
+          exit 1
+
+      - run: go test ./test/e2e/... -tags e2e -v -count=1 -timeout 15m
+
+      - name: Diagnose bei Fehlschlag
+        if: failure()
+        run: |
+          just k -n stateinspector get pods -o wide
+          just k -n stateinspector logs deployment/stateinspector --tail=200 || true
+          just k -n stateinspector describe deployment/stateinspector || true
